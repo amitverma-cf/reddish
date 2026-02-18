@@ -1,0 +1,37 @@
+# CMake generated files
+CMakeLists.txt.user
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Testing/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+CMakeUserPresets.json
+# IDE-specific files
+vscode/
+.vscode/
+cache/
+clangd/
+docs/
+local
+build
+output
+out
+# Compiled object files
+*.o
+*.obj
+# Compiled dynamic libraries
+*.so
+*.dylib
+*.dll
+# Compiled static libraries
+*.a
+*.lib
+# Executables
+*.exe
+*.out
+*.app
