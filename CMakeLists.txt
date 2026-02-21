@@ -8,4 +8,5 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_executable(reddish
     src/main.cpp
     src/resp.cpp
+    src/Database.cpp
 )
