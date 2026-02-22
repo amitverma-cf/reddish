@@ -1,5 +1,9 @@
 #include "resp.hpp"
 
+#include "Database.hpp"
+
+#include <algorithm>
+#include <cctype>
 #include <exception>
 #include <stdexcept>
 #include <utility>
@@ -80,6 +84,47 @@ std::expected<Command, std::string> parse_command(const std::string &input)
     if (position != input.size()) return std::unexpected("Unexpected trailing RESP data");
 
     return command;
+}
+
+Response execute_command(const Command &command, Database &database)
+{
+    std::string name = command.name;
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char character)
+                   { return static_cast<char>(std::toupper(character)); });
+
+    if (name == "PING") return Response{SimpleString{"PONG"}};
+
+    if (name == "SET")
+    {
+        if (command.arguments.size() != 2)
+            return Response{ErrorResponse{"ERR wrong number of arguments for 'set' command"}};
+
+        database.set(command.arguments[0], command.arguments[1]);
+        return Response{SimpleString{"OK"}};
+    }
+
+    if (name == "GET")
+    {
+        if (command.arguments.size() != 1)
+            return Response{ErrorResponse{"ERR wrong number of arguments for 'get' command"}};
+
+        const auto value = database.get(command.arguments[0]);
+        if (!value) return Response{Null{}};
+        return Response{BulkString{*value}};
+    }
+
+    if (name == "DEL")
+    {
+        if (command.arguments.empty())
+            return Response{ErrorResponse{"ERR wrong number of arguments for 'del' command"}};
+
+        std::int64_t deleted = 0;
+        for (const auto &key : command.arguments)
+            deleted += database.del(key) ? 1 : 0;
+        return Response{Integer{deleted}};
+    }
+
+    return Response{ErrorResponse{"ERR unknown command '" + command.name + "'"}};
 }
 
 } // namespace reddish
