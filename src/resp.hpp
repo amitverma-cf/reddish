@@ -19,5 +19,6 @@ struct Command
 
 std::expected<Command, std::string> parse_command(const std::string &input);
 Response execute_command(const Command &command, Database &database);
+std::string encode_response(const Response &response);
 
 } // namespace reddish

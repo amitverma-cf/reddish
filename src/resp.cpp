@@ -6,6 +6,7 @@
 #include <cctype>
 #include <exception>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace reddish
@@ -127,4 +128,56 @@ Response execute_command(const Command &command, Database &database)
     return Response{ErrorResponse{"ERR unknown command '" + command.name + "'"}};
 }
 
+std::string encode_response(const Response &response)
+{
+    std::string encoded;
+    std::visit(
+        [&](const auto &data)
+        {
+            using Data = std::decay_t<decltype(data)>;
+
+            if constexpr (std::is_same_v<Data, SimpleString>)
+            {
+                encoded += "+";
+                encoded += data.value;
+                encoded += "\r\n";
+            }
+            else if constexpr (std::is_same_v<Data, BulkString>)
+            {
+                encoded += "$";
+                encoded += std::to_string(data.value.size());
+                encoded += "\r\n";
+                encoded += data.value;
+                encoded += "\r\n";
+            }
+            else if constexpr (std::is_same_v<Data, ErrorResponse>)
+            {
+                encoded += "-";
+                encoded += data.message;
+                encoded += "\r\n";
+            }
+            else if constexpr (std::is_same_v<Data, Integer>)
+            {
+                encoded += ":";
+                encoded += std::to_string(data.value);
+                encoded += "\r\n";
+            }
+            else if constexpr (std::is_same_v<Data, Null>)
+            {
+                encoded += "$-1\r\n";
+            }
+            else if constexpr (std::is_same_v<Data, ResponseArray>)
+            {
+                encoded += "*";
+                encoded += std::to_string(data.values.size());
+                encoded += "\r\n";
+
+                for (const Response &element : data.values)
+                    encoded += encode_response(element);
+            }
+        },
+        response.data);
+
+    return encoded;
+}
 } // namespace reddish
