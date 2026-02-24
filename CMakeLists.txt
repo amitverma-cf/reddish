@@ -10,6 +10,7 @@ add_executable(reddish
     src/resp.cpp
     src/Database.cpp
     src/Server.cpp
+    src/socket.cpp
 )
 
 target_link_libraries(reddish PRIVATE ws2_32)
