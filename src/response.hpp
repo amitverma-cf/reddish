@@ -1,5 +1,4 @@
 #pragma once
-
 #include <cstdint>
 #include <string>
 #include <variant>
@@ -42,9 +41,8 @@ struct ResponseArray
 struct Response
 {
     using Data =
-        std::variant<SimpleString, BulkString, ErrorResponse, Integer, Null, ResponseArray>;
+        std::variant<SimpleString, ErrorResponse, Integer, BulkString, Null, ResponseArray>;
 
     Data data;
 };
-
 } // namespace reddish

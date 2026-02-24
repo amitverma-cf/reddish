@@ -1,7 +1,5 @@
 #include "resp.hpp"
-
-#include "Database.hpp"
-
+#include "database.hpp"
 #include <algorithm>
 #include <cctype>
 #include <exception>
@@ -14,77 +12,66 @@ namespace reddish
 
 std::expected<Command, std::string> parse_command(const std::string &input)
 {
-    if (input.empty()) return std::unexpected("Empty RESP input");
-
-    std::size_t position = 0;
-    auto read_line = [&]() -> std::expected<std::string, std::string>
+    std::size_t pos = 0;
+    auto readline = [&]() -> std::expected<std::string, std::string>
     {
-        const std::size_t end = input.find("\r\n", position);
+        size_t end = input.find("\r\n", pos);
         if (end == std::string::npos) return std::unexpected("Missing CRLF");
-
-        std::string line = input.substr(position, end - position);
-        position = end + 2;
+        std::string line = input.substr(pos, end - pos);
+        pos = end + 2;
         return line;
     };
-
-    if (input[position++] != '*') return std::unexpected("Expected RESP array prefix '*'");
-
-    const auto count_line = read_line();
-    if (!count_line) return std::unexpected(count_line.error());
-
-    std::size_t count = 0;
+    if (input.empty()) return std::unexpected("Empty RESP input");
+    if (input[0] != '*') return std::unexpected("Expected RESP array prefix '*'");
+    pos++;
+    auto argc_result = readline();
+    if (!argc_result.has_value()) return std::unexpected(argc_result.error());
+    size_t argc;
     try
     {
-        std::size_t consumed = 0;
-        count = std::stoul(*count_line, &consumed);
-        if (consumed != count_line->size()) return std::unexpected("Invalid RESP array length");
+        size_t consumed = 0;
+        argc = std::stoul(argc_result.value(), &consumed);
+        if (consumed != argc_result.value().size())
+            throw std::invalid_argument("invalid array length");
     }
     catch (const std::exception &)
     {
         return std::unexpected("Invalid RESP array length");
     }
-
-    if (count == 0) return std::unexpected("RESP array contains no command");
-
-    Command command;
-    for (std::size_t index = 0; index < count; ++index)
+    if (argc == 0) return std::unexpected("RESP array contains no command");
+    Command cmd;
+    for (size_t i = 0; i < argc; i++)
     {
-        if (position >= input.size() || input[position++] != '$')
-            return std::unexpected("Expected RESP bulk string prefix '$'");
-
-        const auto length_line = read_line();
-        if (!length_line) return std::unexpected(length_line.error());
-
-        std::size_t length = 0;
+        if (pos >= input.size()) return std::unexpected("Missing bulk string prefix");
+        if (input[pos++] != '$') return std::unexpected("Expected bulk string prefix '$'");
+        auto len_result = readline();
+        if (!len_result.has_value()) return std::unexpected(len_result.error());
+        size_t len;
         try
         {
-            std::size_t consumed = 0;
-            length = std::stoul(*length_line, &consumed);
-            if (consumed != length_line->size())
-                return std::unexpected("Invalid RESP bulk string length");
+            size_t consumed = 0;
+            len = std::stoul(len_result.value(), &consumed);
+            if (consumed != len_result.value().size())
+                throw std::invalid_argument("invalid bulk string length");
         }
         catch (const std::exception &)
         {
             return std::unexpected("Invalid RESP bulk string length");
         }
-
-        if (input.size() - position < length + 2)
+        if (pos > input.size() || input.size() - pos < 2 || len > input.size() - pos - 2)
             return std::unexpected("RESP bulk string data is incomplete");
-
-        std::string part(input.data() + position, length);
-        position += length;
-
-        if (input.compare(position, 2, "\r\n") != 0)
+        std::string value(input.data() + pos, len);
+        if (i == 0) cmd.name = value;
+        else cmd.arguments.emplace_back(std::move(value));
+        pos += len;
+        if (input.size() - pos < 2)
             return std::unexpected("RESP bulk string is missing trailing CRLF");
-        position += 2;
-
-        if (index == 0) command.name = std::move(part);
-        else command.arguments.emplace_back(std::move(part));
+        if (input.compare(pos, 2, "\r\n") != 0)
+            return std::unexpected("RESP bulk string is missing trailing CRLF");
+        pos += 2;
     }
-
-    if (position != input.size()) return std::unexpected("Unexpected trailing RESP data");
-
-    return command;
+    if (pos != input.size()) return std::unexpected("Unexpected trailing RESP data");
+    return cmd;
 }
 
 Response execute_command(const Command &command, Database &database)
@@ -130,54 +117,55 @@ Response execute_command(const Command &command, Database &database)
 
 std::string encode_response(const Response &response)
 {
-    std::string encoded;
+    std::string res;
     std::visit(
         [&](const auto &data)
         {
-            using Data = std::decay_t<decltype(data)>;
+            using T = std::decay_t<decltype(data)>;
+            if constexpr (std::is_same_v<T, SimpleString>)
+            {
+                res += "+";
+                res += data.value;
+                res += "\r\n";
+            }
+            else if constexpr (std::is_same_v<T, ErrorResponse>)
+            {
+                res += "-";
+                res += data.message;
+                res += "\r\n";
+            }
+            else if constexpr (std::is_same_v<T, Integer>)
+            {
+                res += ":";
+                res += std::to_string(data.value);
+                res += "\r\n";
+            }
+            else if constexpr (std::is_same_v<T, BulkString>)
+            {
+                res += "$";
+                res += std::to_string(data.value.size());
+                res += "\r\n";
+                res += data.value;
+                res += "\r\n";
+            }
+            else if constexpr (std::is_same_v<T, Null>)
+            {
+                res += "$-1\r\n";
+            }
+            else if constexpr (std::is_same_v<T, ResponseArray>)
+            {
+                res += "*";
+                res += std::to_string(data.values.size());
+                res += "\r\n";
 
-            if constexpr (std::is_same_v<Data, SimpleString>)
-            {
-                encoded += "+";
-                encoded += data.value;
-                encoded += "\r\n";
-            }
-            else if constexpr (std::is_same_v<Data, BulkString>)
-            {
-                encoded += "$";
-                encoded += std::to_string(data.value.size());
-                encoded += "\r\n";
-                encoded += data.value;
-                encoded += "\r\n";
-            }
-            else if constexpr (std::is_same_v<Data, ErrorResponse>)
-            {
-                encoded += "-";
-                encoded += data.message;
-                encoded += "\r\n";
-            }
-            else if constexpr (std::is_same_v<Data, Integer>)
-            {
-                encoded += ":";
-                encoded += std::to_string(data.value);
-                encoded += "\r\n";
-            }
-            else if constexpr (std::is_same_v<Data, Null>)
-            {
-                encoded += "$-1\r\n";
-            }
-            else if constexpr (std::is_same_v<Data, ResponseArray>)
-            {
-                encoded += "*";
-                encoded += std::to_string(data.values.size());
-                encoded += "\r\n";
-
-                for (const Response &element : data.values)
-                    encoded += encode_response(element);
+                for (const auto &element : data.values)
+                {
+                    res += encode_response(element);
+                }
             }
         },
         response.data);
-
-    return encoded;
+    return res;
 }
+
 } // namespace reddish

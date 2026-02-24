@@ -1,5 +1,4 @@
-#include "Server.hpp"
-
+#include "server.hpp"
 #include <exception>
 #include <iostream>
 
@@ -7,7 +6,7 @@ int main()
 {
     try
     {
-        Server server(6379);
+        reddish::Server server(6379);
         server.start();
     }
     catch (const std::exception &error)
