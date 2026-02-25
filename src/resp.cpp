@@ -70,7 +70,7 @@ std::expected<Command, std::string> parse_command(const std::string &input)
             return std::unexpected("RESP bulk string is missing trailing CRLF");
         pos += 2;
     }
-    if (pos != input.size()) return std::unexpected("Unexpected trailing RESP data");
+    cmd.bytes_consumed = pos;
     return cmd;
 }
 

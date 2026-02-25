@@ -73,13 +73,17 @@ void Server::handle_client(int client_id)
     }
 
     client->second.buffer.append(buffer, bytes_received);
-    const auto command = parse_command(client->second.buffer);
-    if (!command) return;
 
-    const Response response = execute_command(*command, database);
-    const std::string encoded = encode_response(response);
-    client->second.socket.send(encoded.data(), encoded.size());
-    client->second.buffer.clear();
+    while (!client->second.buffer.empty())
+    {
+        const auto parsed = parse_command(client->second.buffer);
+        if (!parsed) return;
+
+        const Response response = execute_command(*parsed, database);
+        const std::string encoded = encode_response(response);
+        client->second.socket.send(encoded.data(), encoded.size());
+        client->second.buffer.erase(0, parsed->bytes_consumed);
+    }
 }
 
 void Server::remove_client(int client_id)

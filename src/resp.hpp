@@ -1,5 +1,6 @@
 #pragma once
 #include "response.hpp"
+#include <cstddef>
 #include <expected>
 #include <string>
 #include <vector>
@@ -13,6 +14,7 @@ struct Command
 {
     std::string name;
     std::vector<std::string> arguments;
+    std::size_t bytes_consumed = 0;
 };
 
 std::expected<Command, std::string> parse_command(const std::string &input);
