@@ -25,16 +25,26 @@ void Server::start()
 
     while (running)
     {
-        accept_connections();
+        std::vector<Socket *> watched_sockets{&listen_socket};
+        for (auto &[client_id, client] : clients)
+            if (client.connected) watched_sockets.push_back(&client.socket);
 
-        std::vector<int> client_ids;
-        for (const auto &[client_id, client] : clients)
-            if (client.connected) client_ids.push_back(client_id);
+        const auto ready_sockets = socket_system.wait_for_readable(watched_sockets);
+        for (Socket *ready_socket : ready_sockets)
+        {
+            if (ready_socket == &listen_socket)
+            {
+                accept_connections();
+                continue;
+            }
 
-        for (const int client_id : client_ids)
-            if (clients.contains(client_id)) handle_client(client_id);
-
-        Socket::wait(1);
+            for (const auto &[client_id, client] : clients)
+            {
+                if (&client.socket != ready_socket) continue;
+                handle_client(client_id);
+                break;
+            }
+        }
     }
 }
 
@@ -47,15 +57,18 @@ void Server::stop()
 
 void Server::accept_connections()
 {
-    Socket client = listen_socket.accept();
-    if (!client.valid()) return;
+    while (true)
+    {
+        Socket client = listen_socket.accept();
+        if (!client.valid()) return;
 
-    client.set_nonblocking();
-    const int client_id = next_client_id++;
-    auto [entry, inserted] = clients.try_emplace(client_id);
-    entry->second.socket = std::move(client);
-    entry->second.connected = true;
-    std::cout << "Client connected: " << client_id << '\n';
+        client.set_nonblocking();
+        const int client_id = next_client_id++;
+        auto [entry, inserted] = clients.try_emplace(client_id);
+        entry->second.socket = std::move(client);
+        entry->second.connected = true;
+        std::cout << "Client connected: " << client_id << '\n';
+    }
 }
 
 void Server::handle_client(int client_id)
@@ -76,13 +89,13 @@ void Server::handle_client(int client_id)
 
     while (!client->second.buffer.empty())
     {
-        const auto parsed = parse_command(client->second.buffer);
-        if (!parsed) return;
+        const auto command = parse_command(client->second.buffer);
+        if (!command) return;
 
-        const Response response = execute_command(*parsed, database);
+        const Response response = execute_command(*command, database);
         const std::string encoded = encode_response(response);
         client->second.socket.send(encoded.data(), encoded.size());
-        client->second.buffer.erase(0, parsed->bytes_consumed);
+        client->second.buffer.erase(0, command->bytes_consumed);
     }
 }
 

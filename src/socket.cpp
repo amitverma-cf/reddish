@@ -2,10 +2,9 @@
 
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 #ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
@@ -13,6 +12,7 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -54,6 +54,41 @@ SocketSystem::~SocketSystem()
 #ifdef _WIN32
     WSACleanup();
 #endif
+}
+
+std::vector<Socket *> SocketSystem::wait_for_readable(const std::vector<Socket *> &sockets) const
+{
+    if (sockets.empty()) return {};
+
+#ifdef _WIN32
+    std::vector<WSAPOLLFD> poll_fds;
+    poll_fds.reserve(sockets.size());
+    for (Socket *socket : sockets)
+        poll_fds.push_back({native_handle(socket->handle_), POLLRDNORM, 0});
+
+    if (WSAPoll(poll_fds.data(), static_cast<ULONG>(poll_fds.size()), -1) == SOCKET_ERROR)
+        throw std::runtime_error("WSAPoll failed");
+#else
+    std::vector<pollfd> poll_fds;
+    poll_fds.reserve(sockets.size());
+    for (Socket *socket : sockets)
+        poll_fds.push_back({native_handle(socket->handle_), POLLIN, 0});
+
+    if (poll(poll_fds.data(), poll_fds.size(), -1) < 0) throw std::runtime_error("poll failed");
+#endif
+
+    std::vector<Socket *> ready_sockets;
+    for (std::size_t index = 0; index < sockets.size(); ++index)
+    {
+#ifdef _WIN32
+        const short ready_events = POLLRDNORM | POLLERR | POLLHUP | POLLNVAL;
+#else
+        const short ready_events = POLLIN | POLLERR | POLLHUP | POLLNVAL;
+#endif
+        if (poll_fds[index].revents & ready_events) ready_sockets.push_back(sockets[index]);
+    }
+
+    return ready_sockets;
 }
 
 Socket::Socket() : handle_(portable_handle(invalid_socket)) {}
@@ -180,15 +215,6 @@ void Socket::close()
     ::close(native_handle(handle_));
 #endif
     handle_ = portable_handle(invalid_socket);
-}
-
-void Socket::wait(int milliseconds)
-{
-#ifdef _WIN32
-    Sleep(static_cast<DWORD>(milliseconds));
-#else
-    usleep(static_cast<useconds_t>(milliseconds) * 1000);
-#endif
 }
 
 } // namespace reddish

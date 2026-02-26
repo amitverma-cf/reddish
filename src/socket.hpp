@@ -2,9 +2,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace reddish
 {
+
+class Socket;
 
 class SocketSystem
 {
@@ -13,6 +16,8 @@ class SocketSystem
     ~SocketSystem();
     SocketSystem(const SocketSystem &) = delete;
     SocketSystem &operator=(const SocketSystem &) = delete;
+
+    std::vector<Socket *> wait_for_readable(const std::vector<Socket *> &sockets) const;
 };
 
 class Socket
@@ -37,9 +42,10 @@ class Socket
     bool would_block() const;
     bool valid() const;
     void close();
-    static void wait(int milliseconds);
 
   private:
+    friend class SocketSystem;
+
     std::intptr_t handle_;
 };
 
