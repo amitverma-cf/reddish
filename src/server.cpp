@@ -25,25 +25,39 @@ void Server::start()
 
     while (running)
     {
-        std::vector<Socket *> watched_sockets{&listen_socket};
+        std::vector<SocketPollRequest> requests{{&listen_socket, false}};
         for (auto &[client_id, client] : clients)
-            if (client.connected) watched_sockets.push_back(&client.socket);
+            if (client.connected)
+                requests.push_back({&client.socket, !client.output_buffer.empty()});
 
-        const auto ready_sockets = socket_system.wait_for_readable(watched_sockets);
-        for (Socket *ready_socket : ready_sockets)
+        const auto events = socket_system.wait_for_events(requests);
+        for (const auto &event : events)
         {
-            if (ready_socket == &listen_socket)
+            if (event.socket == &listen_socket)
             {
-                accept_connections();
+                if (event.error) throw std::runtime_error("Listening socket failed");
+                if (event.readable) accept_connections();
                 continue;
             }
 
-            for (const auto &[client_id, client] : clients)
+            int client_id = -1;
+            for (const auto &[id, client] : clients)
             {
-                if (&client.socket != ready_socket) continue;
-                handle_client(client_id);
-                break;
+                if (&client.socket == event.socket)
+                {
+                    client_id = id;
+                    break;
+                }
             }
+            if (client_id < 0) continue;
+
+            if (event.readable) handle_client(client_id);
+            if (!clients.contains(client_id)) continue;
+
+            if (event.writable) flush_client(client_id);
+            if (!clients.contains(client_id)) continue;
+
+            if (event.error) remove_client(client_id);
         }
     }
 }
@@ -77,25 +91,54 @@ void Server::handle_client(int client_id)
     if (client == clients.end()) return;
 
     char buffer[4096];
-    const int bytes_received = client->second.socket.receive(buffer, sizeof(buffer));
-    if (bytes_received <= 0)
+    while (true)
     {
-        if (bytes_received < 0 && client->second.socket.would_block()) return;
+        const int bytes_received = client->second.socket.receive(buffer, sizeof(buffer));
+        if (bytes_received > 0)
+        {
+            client->second.buffer.append(buffer, bytes_received);
+            continue;
+        }
+
+        if (bytes_received == 0)
+        {
+            remove_client(client_id);
+            return;
+        }
+
+        if (client->second.socket.would_block()) break;
         remove_client(client_id);
         return;
     }
-
-    client->second.buffer.append(buffer, bytes_received);
 
     while (!client->second.buffer.empty())
     {
         const auto command = parse_command(client->second.buffer);
         if (!command) return;
 
-        const Response response = execute_command(*command, database);
-        const std::string encoded = encode_response(response);
-        client->second.socket.send(encoded.data(), encoded.size());
+        client->second.output_buffer += encode_response(execute_command(*command, database));
         client->second.buffer.erase(0, command->bytes_consumed);
+    }
+}
+
+void Server::flush_client(int client_id)
+{
+    auto client = clients.find(client_id);
+    if (client == clients.end()) return;
+
+    while (!client->second.output_buffer.empty())
+    {
+        const int bytes_sent = client->second.socket.send(client->second.output_buffer.data(),
+                                                          client->second.output_buffer.size());
+        if (bytes_sent > 0)
+        {
+            client->second.output_buffer.erase(0, bytes_sent);
+            continue;
+        }
+
+        if (bytes_sent < 0 && client->second.socket.would_block()) return;
+        remove_client(client_id);
+        return;
     }
 }
 

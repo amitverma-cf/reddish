@@ -9,6 +9,20 @@ namespace reddish
 
 class Socket;
 
+struct SocketPollRequest
+{
+    Socket *socket;
+    bool watch_writable;
+};
+
+struct SocketPollEvent
+{
+    Socket *socket;
+    bool readable;
+    bool writable;
+    bool error;
+};
+
 class SocketSystem
 {
   public:
@@ -17,7 +31,8 @@ class SocketSystem
     SocketSystem(const SocketSystem &) = delete;
     SocketSystem &operator=(const SocketSystem &) = delete;
 
-    std::vector<Socket *> wait_for_readable(const std::vector<Socket *> &sockets) const;
+    std::vector<SocketPollEvent> wait_for_events(
+        const std::vector<SocketPollRequest> &requests) const;
 };
 
 class Socket

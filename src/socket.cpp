@@ -56,39 +56,52 @@ SocketSystem::~SocketSystem()
 #endif
 }
 
-std::vector<Socket *> SocketSystem::wait_for_readable(const std::vector<Socket *> &sockets) const
+std::vector<SocketPollEvent> SocketSystem::wait_for_events(
+    const std::vector<SocketPollRequest> &requests) const
 {
-    if (sockets.empty()) return {};
+    if (requests.empty()) return {};
 
 #ifdef _WIN32
     std::vector<WSAPOLLFD> poll_fds;
-    poll_fds.reserve(sockets.size());
-    for (Socket *socket : sockets)
-        poll_fds.push_back({native_handle(socket->handle_), POLLRDNORM, 0});
+    poll_fds.reserve(requests.size());
+    for (const auto &request : requests)
+    {
+        short events = POLLRDNORM;
+        if (request.watch_writable) events |= POLLWRNORM;
+        poll_fds.push_back({native_handle(request.socket->handle_), events, 0});
+    }
 
     if (WSAPoll(poll_fds.data(), static_cast<ULONG>(poll_fds.size()), -1) == SOCKET_ERROR)
         throw std::runtime_error("WSAPoll failed");
 #else
     std::vector<pollfd> poll_fds;
-    poll_fds.reserve(sockets.size());
-    for (Socket *socket : sockets)
-        poll_fds.push_back({native_handle(socket->handle_), POLLIN, 0});
+    poll_fds.reserve(requests.size());
+    for (const auto &request : requests)
+    {
+        short events = POLLIN;
+        if (request.watch_writable) events |= POLLOUT;
+        poll_fds.push_back({native_handle(request.socket->handle_), events, 0});
+    }
 
     if (poll(poll_fds.data(), poll_fds.size(), -1) < 0) throw std::runtime_error("poll failed");
 #endif
 
-    std::vector<Socket *> ready_sockets;
-    for (std::size_t index = 0; index < sockets.size(); ++index)
+    std::vector<SocketPollEvent> result;
+    for (std::size_t index = 0; index < requests.size(); ++index)
     {
 #ifdef _WIN32
-        const short ready_events = POLLRDNORM | POLLERR | POLLHUP | POLLNVAL;
+        const bool readable = (poll_fds[index].revents & POLLRDNORM) != 0;
+        const bool writable = (poll_fds[index].revents & POLLWRNORM) != 0;
 #else
-        const short ready_events = POLLIN | POLLERR | POLLHUP | POLLNVAL;
+        const bool readable = (poll_fds[index].revents & POLLIN) != 0;
+        const bool writable = (poll_fds[index].revents & POLLOUT) != 0;
 #endif
-        if (poll_fds[index].revents & ready_events) ready_sockets.push_back(sockets[index]);
+        const bool error = (poll_fds[index].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0;
+        if (readable || writable || error)
+            result.push_back({requests[index].socket, readable, writable, error});
     }
 
-    return ready_sockets;
+    return result;
 }
 
 Socket::Socket() : handle_(portable_handle(invalid_socket)) {}
