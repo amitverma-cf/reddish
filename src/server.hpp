@@ -27,6 +27,7 @@ class Server
         std::string buffer;
         std::string output_buffer;
         bool connected = false;
+        bool close_after_write = false;
     };
 
     SocketSystem socket_system;
@@ -36,6 +37,8 @@ class Server
     Socket listen_socket;
     std::unordered_map<int, ClientInfo> clients;
     int next_client_id;
+
+    static constexpr std::size_t max_input_buffer_size = 1024 * 1024;
 
     void accept_connections();
     void handle_client(int client_id);

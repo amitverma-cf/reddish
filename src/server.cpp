@@ -1,10 +1,23 @@
 #include "server.hpp"
 
 #include <iostream>
+#include <string_view>
 #include <vector>
 
 namespace reddish
 {
+
+namespace
+{
+
+bool is_incomplete_resp_error(std::string_view error)
+{
+    return error == "Missing CRLF" || error == "Missing bulk string prefix" ||
+           error == "RESP bulk string data is incomplete" ||
+           error == "RESP bulk string is missing trailing CRLF";
+}
+
+} // namespace
 
 Server::Server(std::uint16_t port) : port(port), running(false), next_client_id(0) {}
 
@@ -97,6 +110,14 @@ void Server::handle_client(int client_id)
         if (bytes_received > 0)
         {
             client->second.buffer.append(buffer, bytes_received);
+            if (client->second.buffer.size() > max_input_buffer_size)
+            {
+                client->second.output_buffer += encode_response(
+                    Response{ErrorResponse{"ERR request exceeds maximum buffer size"}});
+                client->second.buffer.clear();
+                client->second.close_after_write = true;
+                return;
+            }
             continue;
         }
 
@@ -114,7 +135,16 @@ void Server::handle_client(int client_id)
     while (!client->second.buffer.empty())
     {
         const auto command = parse_command(client->second.buffer);
-        if (!command) return;
+        if (!command)
+        {
+            if (is_incomplete_resp_error(command.error())) return;
+
+            client->second.output_buffer +=
+                encode_response(Response{ErrorResponse{"ERR Protocol error: " + command.error()}});
+            client->second.buffer.clear();
+            client->second.close_after_write = true;
+            return;
+        }
 
         client->second.output_buffer += encode_response(execute_command(*command, database));
         client->second.buffer.erase(0, command->bytes_consumed);
@@ -140,6 +170,8 @@ void Server::flush_client(int client_id)
         remove_client(client_id);
         return;
     }
+
+    if (client->second.close_after_write) remove_client(client_id);
 }
 
 void Server::remove_client(int client_id)
