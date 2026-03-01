@@ -22,6 +22,7 @@ add_executable(reddish
     src/main.cpp
     src/server.cpp
     src/socket.cpp
+    src/error.cpp
     src/database.cpp
     src/resp.cpp
 )

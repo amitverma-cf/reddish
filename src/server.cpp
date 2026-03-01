@@ -1,7 +1,7 @@
 #include "server.hpp"
+#include "error.hpp"
 
 #include <iostream>
-#include <string_view>
 #include <vector>
 
 namespace reddish
@@ -10,11 +10,11 @@ namespace reddish
 namespace
 {
 
-bool is_incomplete_resp_error(std::string_view error)
+bool is_incomplete_resp_error(ErrorCode code)
 {
-    return error == "Missing CRLF" || error == "Missing bulk string prefix" ||
-           error == "RESP bulk string data is incomplete" ||
-           error == "RESP bulk string is missing trailing CRLF";
+    return code == ErrorCode::missing_crlf || code == ErrorCode::missing_bulk_string_prefix ||
+           code == ErrorCode::incomplete_bulk_string_data ||
+           code == ErrorCode::missing_bulk_string_terminator;
 }
 
 } // namespace
@@ -48,7 +48,7 @@ void Server::start()
         {
             if (event.socket == &listen_socket)
             {
-                if (event.error) throw std::runtime_error("Listening socket failed");
+                if (event.error) throw Error{ErrorCode::listening_socket_failed};
                 if (event.readable) accept_connections();
                 continue;
             }
@@ -112,8 +112,8 @@ void Server::handle_client(int client_id)
             client->second.buffer.append(buffer, bytes_received);
             if (client->second.buffer.size() > max_input_buffer_size)
             {
-                client->second.output_buffer += encode_response(
-                    Response{ErrorResponse{"ERR request exceeds maximum buffer size"}});
+                client->second.output_buffer += encode_response(Response{
+                    ErrorResponse{std::string(error_message(ErrorCode::request_too_large))}});
                 client->second.buffer.clear();
                 client->second.close_after_write = true;
                 return;
@@ -137,10 +137,11 @@ void Server::handle_client(int client_id)
         const auto command = parse_command(client->second.buffer);
         if (!command)
         {
-            if (is_incomplete_resp_error(command.error())) return;
+            if (is_incomplete_resp_error(command.error().code())) return;
 
-            client->second.output_buffer +=
-                encode_response(Response{ErrorResponse{"ERR Protocol error: " + command.error()}});
+            client->second.output_buffer += encode_response(Response{
+                ErrorResponse{std::string(error_message(ErrorCode::protocol_error_prefix)) +
+                              std::string(error_message(command.error().code()))}});
             client->second.buffer.clear();
             client->second.close_after_write = true;
             return;

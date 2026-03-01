@@ -1,7 +1,7 @@
 #pragma once
 #include "response.hpp"
+#include "result.hpp"
 #include <cstddef>
-#include <expected>
 #include <string>
 #include <vector>
 
@@ -17,7 +17,7 @@ struct Command
     std::size_t bytes_consumed = 0;
 };
 
-std::expected<Command, std::string> parse_command(const std::string &input);
+Result<Command> parse_command(const std::string &input);
 
 Response execute_command(const Command &command, Database &database);
 

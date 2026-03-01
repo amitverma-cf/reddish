@@ -1,7 +1,7 @@
 #include "socket.hpp"
+#include "error.hpp"
 
 #include <cstring>
-#include <stdexcept>
 #include <vector>
 
 #ifdef _WIN32
@@ -45,7 +45,7 @@ SocketSystem::SocketSystem()
 {
 #ifdef _WIN32
     WSADATA data{};
-    if (WSAStartup(MAKEWORD(2, 2), &data) != 0) throw std::runtime_error("WSAStartup failed");
+    if (WSAStartup(MAKEWORD(2, 2), &data) != 0) throw Error{ErrorCode::socket_startup_failed};
 #endif
 }
 
@@ -72,7 +72,7 @@ std::vector<SocketPollEvent> SocketSystem::wait_for_events(
     }
 
     if (WSAPoll(poll_fds.data(), static_cast<ULONG>(poll_fds.size()), -1) == SOCKET_ERROR)
-        throw std::runtime_error("WSAPoll failed");
+        throw Error{ErrorCode::socket_poll_failed};
 #else
     std::vector<pollfd> poll_fds;
     poll_fds.reserve(requests.size());
@@ -83,7 +83,7 @@ std::vector<SocketPollEvent> SocketSystem::wait_for_events(
         poll_fds.push_back({native_handle(request.socket->handle_), events, 0});
     }
 
-    if (poll(poll_fds.data(), poll_fds.size(), -1) < 0) throw std::runtime_error("poll failed");
+    if (poll(poll_fds.data(), poll_fds.size(), -1) < 0) throw Error{ErrorCode::socket_poll_failed};
 #endif
 
     std::vector<SocketPollEvent> result;
@@ -132,7 +132,7 @@ void Socket::create_tcp()
 #else
     const auto handle = ::socket(AF_INET, SOCK_STREAM, 0);
 #endif
-    if (handle == invalid_socket) throw std::runtime_error("Failed to create TCP socket");
+    if (handle == invalid_socket) throw Error{ErrorCode::socket_creation_failed};
     handle_ = portable_handle(handle);
 }
 
@@ -152,13 +152,12 @@ void Socket::bind(std::uint16_t port)
 #endif
 
     if (::bind(native_handle(handle_), reinterpret_cast<sockaddr *>(&address), sizeof(address)) < 0)
-        throw std::runtime_error("Failed to bind TCP socket");
+        throw Error{ErrorCode::socket_bind_failed};
 }
 
 void Socket::listen(int backlog)
 {
-    if (::listen(native_handle(handle_), backlog) < 0)
-        throw std::runtime_error("Failed to listen on TCP socket");
+    if (::listen(native_handle(handle_), backlog) < 0) throw Error{ErrorCode::socket_listen_failed};
 }
 
 Socket Socket::accept()
@@ -174,7 +173,7 @@ Socket Socket::accept()
     if (client == invalid_socket)
     {
         if (would_block()) return Socket{};
-        throw std::runtime_error("Failed to accept TCP client");
+        throw Error{ErrorCode::socket_accept_failed};
     }
 
     Socket result;
@@ -187,11 +186,11 @@ void Socket::set_nonblocking()
 #ifdef _WIN32
     u_long mode = 1;
     if (ioctlsocket(native_handle(handle_), FIONBIO, &mode) != 0)
-        throw std::runtime_error("Failed to set socket as nonblocking");
+        throw Error{ErrorCode::socket_nonblocking_failed};
 #else
     const int flags = fcntl(native_handle(handle_), F_GETFL, 0);
     if (flags < 0 || fcntl(native_handle(handle_), F_SETFL, flags | O_NONBLOCK) < 0)
-        throw std::runtime_error("Failed to set socket as nonblocking");
+        throw Error{ErrorCode::socket_nonblocking_failed};
 #endif
 }
 
