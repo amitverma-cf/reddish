@@ -57,7 +57,7 @@ SocketSystem::~SocketSystem()
 }
 
 std::vector<SocketPollEvent> SocketSystem::wait_for_events(
-    const std::vector<SocketPollRequest> &requests) const
+    const std::vector<SocketPollRequest> &requests, int timeout_ms) const
 {
     if (requests.empty()) return {};
 
@@ -71,8 +71,11 @@ std::vector<SocketPollEvent> SocketSystem::wait_for_events(
         poll_fds.push_back({native_handle(request.socket->handle_), events, 0});
     }
 
-    if (WSAPoll(poll_fds.data(), static_cast<ULONG>(poll_fds.size()), -1) == SOCKET_ERROR)
+    if (WSAPoll(poll_fds.data(), static_cast<ULONG>(poll_fds.size()), timeout_ms) == SOCKET_ERROR)
+    {
+        if (WSAGetLastError() == WSAEINTR) return {};
         throw Error{ErrorCode::socket_poll_failed};
+    }
 #else
     std::vector<pollfd> poll_fds;
     poll_fds.reserve(requests.size());
@@ -83,7 +86,11 @@ std::vector<SocketPollEvent> SocketSystem::wait_for_events(
         poll_fds.push_back({native_handle(request.socket->handle_), events, 0});
     }
 
-    if (poll(poll_fds.data(), poll_fds.size(), -1) < 0) throw Error{ErrorCode::socket_poll_failed};
+    if (poll(poll_fds.data(), poll_fds.size(), timeout_ms) < 0)
+    {
+        if (errno == EINTR) return {};
+        throw Error{ErrorCode::socket_poll_failed};
+    }
 #endif
 
     std::vector<SocketPollEvent> result;

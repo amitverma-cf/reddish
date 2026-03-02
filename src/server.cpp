@@ -28,6 +28,11 @@ Server::~Server()
 
 void Server::start()
 {
+    start([] { return false; });
+}
+
+void Server::start(bool (*should_stop)())
+{
     running = true;
     listen_socket.create_tcp();
     listen_socket.bind(port);
@@ -36,14 +41,14 @@ void Server::start()
 
     std::cout << "Server listening on port " << port << '\n';
 
-    while (running)
+    while (running && !should_stop())
     {
         std::vector<SocketPollRequest> requests{{&listen_socket, false}};
         for (auto &[client_id, client] : clients)
             if (client.connected)
                 requests.push_back({&client.socket, !client.output_buffer.empty()});
 
-        const auto events = socket_system.wait_for_events(requests);
+        const auto events = socket_system.wait_for_events(requests, shutdown_poll_timeout_ms);
         for (const auto &event : events)
         {
             if (event.socket == &listen_socket)
@@ -73,6 +78,8 @@ void Server::start()
             if (event.error) remove_client(client_id);
         }
     }
+
+    stop();
 }
 
 void Server::stop()

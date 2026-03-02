@@ -31,8 +31,8 @@ class SocketSystem
     SocketSystem(const SocketSystem &) = delete;
     SocketSystem &operator=(const SocketSystem &) = delete;
 
-    std::vector<SocketPollEvent> wait_for_events(
-        const std::vector<SocketPollRequest> &requests) const;
+    std::vector<SocketPollEvent> wait_for_events(const std::vector<SocketPollRequest> &requests,
+                                                 int timeout_ms) const;
 };
 
 class Socket
