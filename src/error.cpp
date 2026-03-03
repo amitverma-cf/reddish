@@ -33,6 +33,8 @@ std::string_view error_message(ErrorCode code)
         return "ERR unknown command";
     case ErrorCode::protocol_error_prefix:
         return "ERR Protocol error: ";
+    case ErrorCode::value_not_integer:
+        return "ERR value is not an integer or out of range";
     case ErrorCode::request_too_large:
         return "ERR request exceeds maximum buffer size";
     case ErrorCode::socket_startup_failed:

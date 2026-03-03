@@ -21,6 +21,7 @@ enum class ErrorCode
     wrong_argument_count,
     unknown_command,
     protocol_error_prefix,
+    value_not_integer,
     request_too_large,
     socket_startup_failed,
     socket_poll_failed,

@@ -105,6 +105,18 @@ Response execute_command(const Command &command, Database &database)
         return Response{BulkString{*value}};
     }
 
+    if (name == "INCR")
+    {
+        if (command.arguments.size() != 1)
+            return Response{ErrorResponse{
+                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'incr' command"}};
+
+        const auto value = database.increment(command.arguments[0]);
+        if (!value)
+            return Response{ErrorResponse{std::string(error_message(value.error().code()))}};
+        return Response{Integer{*value}};
+    }
+
     if (name == "DEL")
     {
         if (command.arguments.empty())
