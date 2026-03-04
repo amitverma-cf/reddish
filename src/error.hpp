@@ -22,6 +22,7 @@ enum class ErrorCode
     unknown_command,
     protocol_error_prefix,
     value_not_integer,
+    wrong_type,
     request_too_large,
     socket_startup_failed,
     socket_poll_failed,

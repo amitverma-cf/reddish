@@ -35,6 +35,8 @@ std::string_view error_message(ErrorCode code)
         return "ERR Protocol error: ";
     case ErrorCode::value_not_integer:
         return "ERR value is not an integer or out of range";
+    case ErrorCode::wrong_type:
+        return "WRONGTYPE Operation against a key holding the wrong kind of value";
     case ErrorCode::request_too_large:
         return "ERR request exceeds maximum buffer size";
     case ErrorCode::socket_startup_failed:

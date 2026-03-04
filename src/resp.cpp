@@ -10,6 +10,36 @@
 namespace reddish
 {
 
+namespace
+{
+
+Response response_from_value(const Value &value)
+{
+    return std::visit(
+        [](const auto &data) -> Response
+        {
+            using Data = std::decay_t<decltype(data)>;
+            if constexpr (std::is_same_v<Data, std::string>)
+            {
+                return Response{BulkString{data}};
+            }
+            else if constexpr (std::is_same_v<Data, std::int64_t>)
+            {
+                return Response{Integer{data}};
+            }
+            else
+            {
+                ResponseArray array;
+                for (const auto &element : data->values)
+                    array.values.push_back(response_from_value(element));
+                return Response{std::move(array)};
+            }
+        },
+        value);
+}
+
+} // namespace
+
 Result<Command> parse_command(const std::string &input)
 {
     std::size_t pos = 0;
@@ -101,8 +131,10 @@ Response execute_command(const Command &command, Database &database)
                 std::string(error_message(ErrorCode::wrong_argument_count)) + " 'get' command"}};
 
         const auto value = database.get(command.arguments[0]);
-        if (!value) return Response{Null{}};
-        return Response{BulkString{*value}};
+        if (!value)
+            return Response{ErrorResponse{std::string(error_message(value.error().code()))}};
+        if (!*value) return Response{Null{}};
+        return Response{BulkString{**value}};
     }
 
     if (name == "INCR")
@@ -115,6 +147,52 @@ Response execute_command(const Command &command, Database &database)
         if (!value)
             return Response{ErrorResponse{std::string(error_message(value.error().code()))}};
         return Response{Integer{*value}};
+    }
+
+    if (name == "LPUSH" || name == "RPUSH")
+    {
+        if (command.arguments.size() < 2)
+            return Response{
+                ErrorResponse{std::string(error_message(ErrorCode::wrong_argument_count)) + " '" +
+                              std::string(name.begin(), name.end()) + "' command"}};
+
+        Result<std::int64_t> length = std::int64_t{0};
+        for (std::size_t index = 1; index < command.arguments.size(); ++index)
+        {
+            length = name == "LPUSH"
+                         ? database.push_left(command.arguments[0], command.arguments[index])
+                         : database.push_right(command.arguments[0], command.arguments[index]);
+            if (!length)
+                return Response{ErrorResponse{std::string(error_message(length.error().code()))}};
+        }
+        return Response{Integer{*length}};
+    }
+
+    if (name == "LPOP" || name == "RPOP")
+    {
+        if (command.arguments.size() != 1)
+            return Response{
+                ErrorResponse{std::string(error_message(ErrorCode::wrong_argument_count)) + " '" +
+                              std::string(name.begin(), name.end()) + "' command"}};
+
+        const auto value = name == "LPOP" ? database.pop_left(command.arguments[0])
+                                          : database.pop_right(command.arguments[0]);
+        if (!value)
+            return Response{ErrorResponse{std::string(error_message(value.error().code()))}};
+        if (!*value) return Response{Null{}};
+        return response_from_value(**value);
+    }
+
+    if (name == "LLEN")
+    {
+        if (command.arguments.size() != 1)
+            return Response{ErrorResponse{
+                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'llen' command"}};
+
+        const auto length = database.list_length(command.arguments[0]);
+        if (!length)
+            return Response{ErrorResponse{std::string(error_message(length.error().code()))}};
+        return Response{Integer{*length}};
     }
 
     if (name == "DEL")
