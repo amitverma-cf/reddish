@@ -27,11 +27,21 @@ Response response_from_value(const Value &value)
             {
                 return Response{Integer{data}};
             }
-            else
+            else if constexpr (std::is_same_v<Data, ListPtr>)
             {
                 ResponseArray array;
                 for (const auto &element : data->values)
                     array.values.push_back(response_from_value(element));
+                return Response{std::move(array)};
+            }
+            else
+            {
+                ResponseArray array;
+                for (const auto &[field, element] : data->fields)
+                {
+                    array.values.push_back(Response{BulkString{field}});
+                    array.values.push_back(response_from_value(element));
+                }
                 return Response{std::move(array)};
             }
         },
@@ -190,6 +200,61 @@ Response execute_command(const Command &command, Database &database)
                 std::string(error_message(ErrorCode::wrong_argument_count)) + " 'llen' command"}};
 
         const auto length = database.list_length(command.arguments[0]);
+        if (!length)
+            return Response{ErrorResponse{std::string(error_message(length.error().code()))}};
+        return Response{Integer{*length}};
+    }
+
+    if (name == "HSET")
+    {
+        if (command.arguments.size() < 3 || command.arguments.size() % 2 == 0)
+            return Response{ErrorResponse{
+                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'hset' command"}};
+
+        std::int64_t added = 0;
+        for (std::size_t index = 1; index < command.arguments.size(); index += 2)
+        {
+            const auto result = database.hash_set(command.arguments[0], command.arguments[index],
+                                                  command.arguments[index + 1]);
+            if (!result)
+                return Response{ErrorResponse{std::string(error_message(result.error().code()))}};
+            added += *result;
+        }
+        return Response{Integer{added}};
+    }
+
+    if (name == "HGET")
+    {
+        if (command.arguments.size() != 2)
+            return Response{ErrorResponse{
+                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'hget' command"}};
+
+        const auto value = database.hash_get(command.arguments[0], command.arguments[1]);
+        if (!value)
+            return Response{ErrorResponse{std::string(error_message(value.error().code()))}};
+        if (!*value) return Response{Null{}};
+        return response_from_value(**value);
+    }
+
+    if (name == "HDEL")
+    {
+        if (command.arguments.size() != 2)
+            return Response{ErrorResponse{
+                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'hdel' command"}};
+
+        const auto removed = database.hash_del(command.arguments[0], command.arguments[1]);
+        if (!removed)
+            return Response{ErrorResponse{std::string(error_message(removed.error().code()))}};
+        return Response{Integer{*removed ? 1 : 0}};
+    }
+
+    if (name == "HLEN")
+    {
+        if (command.arguments.size() != 1)
+            return Response{ErrorResponse{
+                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'hlen' command"}};
+
+        const auto length = database.hash_length(command.arguments[0]);
         if (!length)
             return Response{ErrorResponse{std::string(error_message(length.error().code()))}};
         return Response{Integer{*length}};

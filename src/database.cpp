@@ -53,7 +53,8 @@ Result<std::int64_t> Database::increment(const std::string &key)
         return *integer;
     }
 
-    if (std::holds_alternative<ListPtr>(it->second.value))
+    if (std::holds_alternative<ListPtr>(it->second.value) ||
+        std::holds_alternative<HashPtr>(it->second.value))
         return std::unexpected(Error{ErrorCode::wrong_type});
 
     try
@@ -131,6 +132,47 @@ Result<std::int64_t> Database::list_length(const std::string &key)
     return static_cast<std::int64_t>((*list)->values.size());
 }
 
+Result<std::int64_t> Database::hash_set(const std::string &key, const std::string &field,
+                                        Value value)
+{
+    auto hash = get_or_create_hash(key);
+    if (!hash) return std::unexpected(hash.error());
+
+    const auto [entry, inserted] = (*hash)->fields.insert_or_assign(field, std::move(value));
+    return inserted ? 1 : 0;
+}
+
+Result<std::optional<Value>> Database::hash_get(const std::string &key, const std::string &field)
+{
+    auto hash = find_hash(key);
+    if (!hash) return std::unexpected(hash.error());
+    if (*hash == nullptr) return std::nullopt;
+
+    const auto value = (*hash)->fields.find(field);
+    if (value == (*hash)->fields.end()) return std::nullopt;
+    return value->second;
+}
+
+Result<bool> Database::hash_del(const std::string &key, const std::string &field)
+{
+    auto hash = find_hash(key);
+    if (!hash) return std::unexpected(hash.error());
+    if (*hash == nullptr) return false;
+
+    const bool removed = (*hash)->fields.erase(field) > 0;
+    if ((*hash)->fields.empty()) del(key);
+    return removed;
+}
+
+Result<std::int64_t> Database::hash_length(const std::string &key)
+{
+    auto hash = find_hash(key);
+    if (!hash) return std::unexpected(hash.error());
+    if (*hash == nullptr) return 0;
+
+    return static_cast<std::int64_t>((*hash)->fields.size());
+}
+
 Result<ListPtr> Database::get_or_create_list(const std::string &key)
 {
     auto it = kv_store.find(key);
@@ -154,6 +196,32 @@ Result<ListPtr> Database::find_list(const std::string &key)
     if (it == kv_store.end()) return nullptr;
     touch(it);
     if (auto *list = std::get_if<ListPtr>(&it->second.value)) return *list;
+    return std::unexpected(Error{ErrorCode::wrong_type});
+}
+
+Result<HashPtr> Database::get_or_create_hash(const std::string &key)
+{
+    auto it = kv_store.find(key);
+    if (it == kv_store.end())
+    {
+        insert(key, std::make_shared<Hash>());
+        it = kv_store.find(key);
+    }
+    else
+    {
+        touch(it);
+    }
+
+    if (auto *hash = std::get_if<HashPtr>(&it->second.value)) return *hash;
+    return std::unexpected(Error{ErrorCode::wrong_type});
+}
+
+Result<HashPtr> Database::find_hash(const std::string &key)
+{
+    const auto it = kv_store.find(key);
+    if (it == kv_store.end()) return nullptr;
+    touch(it);
+    if (auto *hash = std::get_if<HashPtr>(&it->second.value)) return *hash;
     return std::unexpected(Error{ErrorCode::wrong_type});
 }
 
