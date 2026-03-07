@@ -2,6 +2,7 @@
 
 #include "error.hpp"
 
+#include <algorithm>
 #include <exception>
 #include <limits>
 
@@ -12,10 +13,11 @@ Database::Database(std::size_t max_keys) : max_keys(max_keys == 0 ? 1 : max_keys
 
 void Database::set(const std::string &key, const std::string &val)
 {
-    const auto entry = kv_store.find(key);
+    const auto entry = find_active(key);
     if (entry != kv_store.end())
     {
         entry->second.value = val;
+        entry->second.expires_at.reset();
         touch(entry);
         return;
     }
@@ -25,7 +27,7 @@ void Database::set(const std::string &key, const std::string &val)
 
 Result<std::optional<std::string>> Database::get(const std::string &key)
 {
-    auto it = Database::kv_store.find(key);
+    auto it = find_active(key);
     if (it == Database::kv_store.end()) return std::nullopt;
     touch(it);
 
@@ -37,7 +39,7 @@ Result<std::optional<std::string>> Database::get(const std::string &key)
 
 Result<std::int64_t> Database::increment(const std::string &key)
 {
-    auto it = kv_store.find(key);
+    auto it = find_active(key);
     if (it == kv_store.end())
     {
         insert(key, std::int64_t{1});
@@ -104,7 +106,7 @@ Result<std::optional<Value>> Database::pop_left(const std::string &key)
 
     Value value = std::move(values.front());
     values.erase(values.begin());
-    if (values.empty()) kv_store.erase(key);
+    if (values.empty()) del(key);
     return value;
 }
 
@@ -119,7 +121,7 @@ Result<std::optional<Value>> Database::pop_right(const std::string &key)
 
     Value value = std::move(values.back());
     values.pop_back();
-    if (values.empty()) kv_store.erase(key);
+    if (values.empty()) del(key);
     return value;
 }
 
@@ -175,7 +177,7 @@ Result<std::int64_t> Database::hash_length(const std::string &key)
 
 Result<ListPtr> Database::get_or_create_list(const std::string &key)
 {
-    auto it = kv_store.find(key);
+    auto it = find_active(key);
     if (it == kv_store.end())
     {
         insert(key, std::make_shared<List>());
@@ -192,7 +194,7 @@ Result<ListPtr> Database::get_or_create_list(const std::string &key)
 
 Result<ListPtr> Database::find_list(const std::string &key)
 {
-    const auto it = kv_store.find(key);
+    const auto it = find_active(key);
     if (it == kv_store.end()) return nullptr;
     touch(it);
     if (auto *list = std::get_if<ListPtr>(&it->second.value)) return *list;
@@ -201,7 +203,7 @@ Result<ListPtr> Database::find_list(const std::string &key)
 
 Result<HashPtr> Database::get_or_create_hash(const std::string &key)
 {
-    auto it = kv_store.find(key);
+    auto it = find_active(key);
     if (it == kv_store.end())
     {
         insert(key, std::make_shared<Hash>());
@@ -218,7 +220,7 @@ Result<HashPtr> Database::get_or_create_hash(const std::string &key)
 
 Result<HashPtr> Database::find_hash(const std::string &key)
 {
-    const auto it = kv_store.find(key);
+    const auto it = find_active(key);
     if (it == kv_store.end()) return nullptr;
     touch(it);
     if (auto *hash = std::get_if<HashPtr>(&it->second.value)) return *hash;
@@ -227,23 +229,89 @@ Result<HashPtr> Database::find_hash(const std::string &key)
 
 bool Database::del(const std::string &key)
 {
-    const auto entry = kv_store.find(key);
+    const auto entry = find_active(key);
     if (entry == kv_store.end()) return false;
 
-    lru_keys.erase(entry->second.lru_position);
-    kv_store.erase(entry);
+    erase(entry);
     return true;
+}
+
+bool Database::expire(const std::string &key, std::int64_t seconds)
+{
+    const auto entry = find_active(key);
+    if (entry == kv_store.end()) return false;
+
+    if (seconds <= 0)
+    {
+        erase(entry);
+        return true;
+    }
+
+    entry->second.expires_at = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+    touch(entry);
+    return true;
+}
+
+std::int64_t Database::ttl(const std::string &key)
+{
+    const auto entry = find_active(key);
+    if (entry == kv_store.end()) return -2;
+    touch(entry);
+    if (!entry->second.expires_at) return -1;
+
+    return std::max<std::int64_t>(0,
+                                  std::chrono::duration_cast<std::chrono::seconds>(
+                                      *entry->second.expires_at - std::chrono::steady_clock::now())
+                                      .count());
+}
+
+void Database::remove_expired()
+{
+    const auto now = std::chrono::steady_clock::now();
+    for (auto entry = kv_store.begin(); entry != kv_store.end();)
+    {
+        if (entry->second.expires_at && *entry->second.expires_at <= now)
+        {
+            lru_keys.erase(entry->second.lru_position);
+            entry = kv_store.erase(entry);
+        }
+        else
+        {
+            ++entry;
+        }
+    }
 }
 
 Database::Entry &Database::insert(const std::string &key, Value value)
 {
     evict_if_full();
     lru_keys.push_front(key);
-    auto [entry, inserted] = kv_store.emplace(key, Entry{std::move(value), lru_keys.begin()});
+    auto [entry, inserted] =
+        kv_store.emplace(key, Entry{std::move(value), lru_keys.begin(), std::nullopt});
     return entry->second;
 }
 
-void Database::touch(std::unordered_map<std::string, Entry>::iterator entry)
+Database::Store::iterator Database::find_active(const std::string &key)
+{
+    const auto entry = kv_store.find(key);
+    if (entry == kv_store.end()) return entry;
+
+    if (entry->second.expires_at && *entry->second.expires_at <= std::chrono::steady_clock::now())
+    {
+        erase(entry);
+        return kv_store.end();
+    }
+
+    return entry;
+}
+
+void Database::erase(Store::iterator entry)
+{
+    lru_keys.erase(entry->second.lru_position);
+    kv_store.erase(entry);
+}
+
+void Database::touch(Store::iterator entry)
 {
     lru_keys.splice(lru_keys.begin(), lru_keys, entry->second.lru_position);
     entry->second.lru_position = lru_keys.begin();

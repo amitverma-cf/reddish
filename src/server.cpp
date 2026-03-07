@@ -49,6 +49,7 @@ void Server::start(bool (*should_stop)())
                 requests.push_back({&client.socket, !client.output_buffer.empty()});
 
         const auto events = socket_system.wait_for_events(requests, shutdown_poll_timeout_ms);
+        database.remove_expired();
         for (const auto &event : events)
         {
             if (event.socket == &listen_socket)

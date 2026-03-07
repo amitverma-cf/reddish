@@ -1,6 +1,7 @@
 #pragma once
 #include "result.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <list>
 #include <memory>
@@ -38,9 +39,12 @@ class Database
     {
         Value value;
         KeyOrder::iterator lru_position;
+        std::optional<std::chrono::steady_clock::time_point> expires_at;
     };
 
-    std::unordered_map<std::string, Entry> kv_store;
+    using Store = std::unordered_map<std::string, Entry>;
+
+    Store kv_store;
     KeyOrder lru_keys;
     std::size_t max_keys;
 
@@ -64,6 +68,10 @@ class Database
     Result<bool> hash_del(const std::string &key, const std::string &field);
     Result<std::int64_t> hash_length(const std::string &key);
 
+    bool expire(const std::string &key, std::int64_t seconds);
+    std::int64_t ttl(const std::string &key);
+    void remove_expired();
+
     bool del(const std::string &key);
 
   private:
@@ -72,7 +80,9 @@ class Database
     Result<HashPtr> get_or_create_hash(const std::string &key);
     Result<HashPtr> find_hash(const std::string &key);
     Entry &insert(const std::string &key, Value value);
-    void touch(std::unordered_map<std::string, Entry>::iterator entry);
+    Store::iterator find_active(const std::string &key);
+    void erase(Store::iterator entry);
+    void touch(Store::iterator entry);
     void evict_if_full();
 };
 

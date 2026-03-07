@@ -48,6 +48,21 @@ Response response_from_value(const Value &value)
         value);
 }
 
+Result<std::int64_t> parse_integer(const std::string &input)
+{
+    try
+    {
+        std::size_t consumed = 0;
+        const auto value = std::stoll(input, &consumed);
+        if (consumed != input.size()) return std::unexpected(Error{ErrorCode::value_not_integer});
+        return value;
+    }
+    catch (const std::exception &)
+    {
+        return std::unexpected(Error{ErrorCode::value_not_integer});
+    }
+}
+
 } // namespace
 
 Result<Command> parse_command(const std::string &input)
@@ -258,6 +273,27 @@ Response execute_command(const Command &command, Database &database)
         if (!length)
             return Response{ErrorResponse{std::string(error_message(length.error().code()))}};
         return Response{Integer{*length}};
+    }
+
+    if (name == "EXPIRE")
+    {
+        if (command.arguments.size() != 2)
+            return Response{ErrorResponse{
+                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'expire' command"}};
+
+        const auto seconds = parse_integer(command.arguments[1]);
+        if (!seconds)
+            return Response{ErrorResponse{std::string(error_message(seconds.error().code()))}};
+        return Response{Integer{database.expire(command.arguments[0], *seconds) ? 1 : 0}};
+    }
+
+    if (name == "TTL")
+    {
+        if (command.arguments.size() != 1)
+            return Response{ErrorResponse{
+                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'ttl' command"}};
+
+        return Response{Integer{database.ttl(command.arguments[0])}};
     }
 
     if (name == "DEL")
