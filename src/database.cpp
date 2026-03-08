@@ -4,10 +4,69 @@
 
 #include <algorithm>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <limits>
+#include <type_traits>
 
 namespace reddish
 {
+
+namespace
+{
+
+template <typename T> bool write_value(std::ofstream &output, const T &value)
+{
+    output.write(reinterpret_cast<const char *>(&value), sizeof(value));
+    return output.good();
+}
+
+bool write_string(std::ofstream &output, const std::string &value)
+{
+    const auto size = static_cast<std::uint64_t>(value.size());
+    output.write(reinterpret_cast<const char *>(&size), sizeof(size));
+    output.write(value.data(), static_cast<std::streamsize>(value.size()));
+    return output.good();
+}
+
+bool write_database_value(std::ofstream &output, const Value &value)
+{
+    return std::visit(
+        [&](const auto &data)
+        {
+            using Data = std::decay_t<decltype(data)>;
+            if constexpr (std::is_same_v<Data, std::string>)
+            {
+                return write_value(output, std::uint8_t{0}) && write_string(output, data);
+            }
+            else if constexpr (std::is_same_v<Data, std::int64_t>)
+            {
+                return write_value(output, std::uint8_t{1}) && write_value(output, data);
+            }
+            else if constexpr (std::is_same_v<Data, ListPtr>)
+            {
+                if (!write_value(output, std::uint8_t{2}) ||
+                    !write_value(output, static_cast<std::uint64_t>(data->values.size())))
+                    return false;
+                for (const auto &item : data->values)
+                    if (!write_database_value(output, item)) return false;
+                return true;
+            }
+            else
+            {
+                if (!write_value(output, std::uint8_t{3}) ||
+                    !write_value(output, static_cast<std::uint64_t>(data->fields.size())))
+                    return false;
+                for (const auto &[field, item] : data->fields)
+                    if (!write_string(output, field) || !write_database_value(output, item))
+                        return false;
+                return true;
+            }
+        },
+        value);
+}
+
+} // namespace
 
 Database::Database(std::size_t max_keys) : max_keys(max_keys == 0 ? 1 : max_keys) {}
 
@@ -280,6 +339,49 @@ void Database::remove_expired()
             ++entry;
         }
     }
+}
+
+Result<void> Database::dump_to_disk(const std::filesystem::path &path)
+{
+    remove_expired();
+
+    const auto temporary_path = path.string() + ".tmp";
+    std::ofstream output(temporary_path, std::ios::binary | std::ios::trunc);
+    if (!output) return std::unexpected(Error{ErrorCode::disk_write_failed});
+
+    constexpr std::uint64_t format_version = 1;
+    if (!write_value(output, format_version) ||
+        !write_value(output, static_cast<std::uint64_t>(kv_store.size())))
+        return std::unexpected(Error{ErrorCode::disk_write_failed});
+
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto &[key, entry] : kv_store)
+    {
+        const auto expires_in =
+            entry.expires_at
+                ? std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                *entry.expires_at - now)
+                                                .count())
+                : -1;
+        if (!write_string(output, key) || !write_value(output, expires_in) ||
+            !write_database_value(output, entry.value))
+            return std::unexpected(Error{ErrorCode::disk_write_failed});
+    }
+
+    output.close();
+    if (!output) return std::unexpected(Error{ErrorCode::disk_write_failed});
+
+    std::error_code error;
+    std::filesystem::remove(path, error);
+    error.clear();
+    std::filesystem::rename(temporary_path, path, error);
+    if (error)
+    {
+        std::filesystem::remove(temporary_path, error);
+        return std::unexpected(Error{ErrorCode::disk_write_failed});
+    }
+
+    return {};
 }
 
 Database::Entry &Database::insert(const std::string &key, Value value)

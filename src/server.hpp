@@ -4,6 +4,7 @@
 #include "resp.hpp"
 #include "socket.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -41,6 +42,7 @@ class Server
 
     static constexpr std::size_t max_input_buffer_size = 1024 * 1024;
     static constexpr int shutdown_poll_timeout_ms = 100;
+    static constexpr auto dump_interval = std::chrono::minutes(5);
 
     void accept_connections();
     void handle_client(int client_id);

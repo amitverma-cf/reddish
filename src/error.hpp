@@ -24,6 +24,7 @@ enum class ErrorCode
     value_not_integer,
     wrong_type,
     request_too_large,
+    disk_write_failed,
     socket_startup_failed,
     socket_poll_failed,
     socket_creation_failed,

@@ -39,6 +39,8 @@ std::string_view error_message(ErrorCode code)
         return "WRONGTYPE Operation against a key holding the wrong kind of value";
     case ErrorCode::request_too_large:
         return "ERR request exceeds maximum buffer size";
+    case ErrorCode::disk_write_failed:
+        return "Failed to write database dump";
     case ErrorCode::socket_startup_failed:
         return "Failed to initialize socket system";
     case ErrorCode::socket_poll_failed:

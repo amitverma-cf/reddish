@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <list>
 #include <memory>
 #include <optional>
@@ -71,6 +72,7 @@ class Database
     bool expire(const std::string &key, std::int64_t seconds);
     std::int64_t ttl(const std::string &key);
     void remove_expired();
+    Result<void> dump_to_disk(const std::filesystem::path &path);
 
     bool del(const std::string &key);
 

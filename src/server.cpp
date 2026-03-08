@@ -40,6 +40,7 @@ void Server::start(bool (*should_stop)())
     listen_socket.set_nonblocking();
 
     std::cout << "Server listening on port " << port << '\n';
+    auto next_dump = std::chrono::steady_clock::now() + dump_interval;
 
     while (running && !should_stop())
     {
@@ -50,6 +51,12 @@ void Server::start(bool (*should_stop)())
 
         const auto events = socket_system.wait_for_events(requests, shutdown_poll_timeout_ms);
         database.remove_expired();
+        if (std::chrono::steady_clock::now() >= next_dump)
+        {
+            const auto dump = database.dump_to_disk("dump.reddish");
+            if (!dump) throw dump.error();
+            next_dump = std::chrono::steady_clock::now() + dump_interval;
+        }
         for (const auto &event : events)
         {
             if (event.socket == &listen_socket)
