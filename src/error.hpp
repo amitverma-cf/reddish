@@ -25,6 +25,7 @@ enum class ErrorCode
     wrong_type,
     request_too_large,
     disk_write_failed,
+    disk_read_failed,
     socket_startup_failed,
     socket_poll_failed,
     socket_creation_failed,

@@ -97,6 +97,11 @@ void Server::stop()
     listen_socket.close();
 }
 
+Result<void> Server::load_from_disk(const std::filesystem::path &path)
+{
+    return database.load_from_disk(path);
+}
+
 void Server::accept_connections()
 {
     while (true)

@@ -73,6 +73,7 @@ class Database
     std::int64_t ttl(const std::string &key);
     void remove_expired();
     Result<void> dump_to_disk(const std::filesystem::path &path);
+    Result<void> load_from_disk(const std::filesystem::path &path);
 
     bool del(const std::string &key);
 

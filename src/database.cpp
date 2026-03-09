@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <tuple>
 #include <type_traits>
 
 namespace reddish
@@ -21,12 +22,30 @@ template <typename T> bool write_value(std::ofstream &output, const T &value)
     return output.good();
 }
 
+template <typename T> bool read_value(std::ifstream &input, T &value)
+{
+    input.read(reinterpret_cast<char *>(&value), sizeof(value));
+    return input.good();
+}
+
 bool write_string(std::ofstream &output, const std::string &value)
 {
     const auto size = static_cast<std::uint64_t>(value.size());
     output.write(reinterpret_cast<const char *>(&size), sizeof(size));
     output.write(value.data(), static_cast<std::streamsize>(value.size()));
     return output.good();
+}
+
+bool read_string(std::ifstream &input, std::string &value)
+{
+    constexpr std::uint64_t max_string_size = 64 * 1024 * 1024;
+
+    std::uint64_t size = 0;
+    if (!read_value(input, size) || size > max_string_size) return false;
+
+    value.resize(static_cast<std::size_t>(size));
+    input.read(value.data(), static_cast<std::streamsize>(size));
+    return input.good();
 }
 
 bool write_database_value(std::ofstream &output, const Value &value)
@@ -64,6 +83,59 @@ bool write_database_value(std::ofstream &output, const Value &value)
             }
         },
         value);
+}
+
+bool read_database_value(std::ifstream &input, Value &value)
+{
+    constexpr std::uint64_t max_collection_size = 1'000'000;
+
+    std::uint8_t type = 0;
+    if (!read_value(input, type)) return false;
+
+    if (type == 0)
+    {
+        std::string string;
+        if (!read_string(input, string)) return false;
+        value = std::move(string);
+        return true;
+    }
+
+    if (type == 1)
+    {
+        std::int64_t integer = 0;
+        if (!read_value(input, integer)) return false;
+        value = integer;
+        return true;
+    }
+
+    std::uint64_t count = 0;
+    if ((type != 2 && type != 3) || !read_value(input, count) || count > max_collection_size)
+        return false;
+
+    if (type == 2)
+    {
+        auto list = std::make_shared<List>();
+        list->values.reserve(static_cast<std::size_t>(count));
+        for (std::uint64_t index = 0; index < count; ++index)
+        {
+            Value item;
+            if (!read_database_value(input, item)) return false;
+            list->values.push_back(std::move(item));
+        }
+        value = std::move(list);
+        return true;
+    }
+
+    auto hash = std::make_shared<Hash>();
+    for (std::uint64_t index = 0; index < count; ++index)
+    {
+        std::string field;
+        Value item;
+        if (!read_string(input, field) || !read_database_value(input, item)) return false;
+        hash->fields.emplace(std::move(field), std::move(item));
+    }
+    value = std::move(hash);
+    return true;
 }
 
 } // namespace
@@ -354,16 +426,16 @@ Result<void> Database::dump_to_disk(const std::filesystem::path &path)
         !write_value(output, static_cast<std::uint64_t>(kv_store.size())))
         return std::unexpected(Error{ErrorCode::disk_write_failed});
 
-    const auto now = std::chrono::steady_clock::now();
+    const auto steady_now = std::chrono::steady_clock::now();
+    const auto system_now = std::chrono::system_clock::now();
     for (const auto &[key, entry] : kv_store)
     {
-        const auto expires_in =
-            entry.expires_at
-                ? std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                *entry.expires_at - now)
-                                                .count())
-                : -1;
-        if (!write_string(output, key) || !write_value(output, expires_in) ||
+        const auto expires_at =
+            entry.expires_at ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   system_now.time_since_epoch() + (*entry.expires_at - steady_now))
+                                   .count()
+                             : -1;
+        if (!write_string(output, key) || !write_value(output, expires_at) ||
             !write_database_value(output, entry.value))
             return std::unexpected(Error{ErrorCode::disk_write_failed});
     }
@@ -379,6 +451,50 @@ Result<void> Database::dump_to_disk(const std::filesystem::path &path)
     {
         std::filesystem::remove(temporary_path, error);
         return std::unexpected(Error{ErrorCode::disk_write_failed});
+    }
+
+    return {};
+}
+
+Result<void> Database::load_from_disk(const std::filesystem::path &path)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return std::unexpected(Error{ErrorCode::disk_read_failed});
+
+    constexpr std::uint64_t format_version = 1;
+    std::uint64_t version = 0;
+    std::uint64_t count = 0;
+    if (!read_value(input, version) || version != format_version || !read_value(input, count) ||
+        count > max_keys)
+        return std::unexpected(Error{ErrorCode::disk_read_failed});
+
+    std::vector<std::tuple<std::string, std::int64_t, Value>> entries;
+    entries.reserve(static_cast<std::size_t>(count));
+    for (std::uint64_t index = 0; index < count; ++index)
+    {
+        std::string key;
+        std::int64_t expires_at = -1;
+        Value value;
+        if (!read_string(input, key) || !read_value(input, expires_at) ||
+            !read_database_value(input, value))
+            return std::unexpected(Error{ErrorCode::disk_read_failed});
+        entries.emplace_back(std::move(key), expires_at, std::move(value));
+    }
+
+    kv_store.clear();
+    lru_keys.clear();
+
+    const auto system_now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
+    for (auto &[key, expires_at, value] : entries)
+    {
+        if (expires_at >= 0 && expires_at <= system_now) continue;
+
+        auto &entry = insert(key, std::move(value));
+        if (expires_at >= 0)
+            entry.expires_at = std::chrono::steady_clock::now() +
+                               std::chrono::milliseconds(expires_at - system_now);
     }
 
     return {};

@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <unordered_map>
 
@@ -21,6 +22,7 @@ class Server
     void start();
     void start(bool (*should_stop)());
     void stop();
+    Result<void> load_from_disk(const std::filesystem::path &path);
 
   private:
     struct ClientInfo
