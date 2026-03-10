@@ -34,6 +34,7 @@ void Server::start()
 void Server::start(bool (*should_stop)())
 {
     running = true;
+    started_at = std::chrono::steady_clock::now();
     listen_socket.create_tcp();
     listen_socket.bind(port);
     listen_socket.listen(128);
@@ -167,7 +168,11 @@ void Server::handle_client(int client_id)
             return;
         }
 
-        client->second.output_buffer += encode_response(execute_command(*command, database));
+        const ServerStats stats{database.stats(), clients.size(),
+                                std::chrono::duration_cast<std::chrono::seconds>(
+                                    std::chrono::steady_clock::now() - started_at)
+                                    .count()};
+        client->second.output_buffer += encode_response(execute_command(*command, database, stats));
         client->second.buffer.erase(0, command->bytes_consumed);
     }
 }

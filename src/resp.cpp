@@ -131,13 +131,44 @@ Result<Command> parse_command(const std::string &input)
     return cmd;
 }
 
-Response execute_command(const Command &command, Database &database)
+Response execute_command(const Command &command, Database &database, const ServerStats &stats)
 {
     std::string name = command.name;
     std::transform(name.begin(), name.end(), name.begin(), [](unsigned char character)
                    { return static_cast<char>(std::toupper(character)); });
 
     if (name == "PING") return Response{SimpleString{"PONG"}};
+
+    if (name == "INFO")
+    {
+        if (command.arguments.size() > 1)
+            return Response{ErrorResponse{
+                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'info' command"}};
+
+        const bool memory_only = !command.arguments.empty() && command.arguments[0] == "memory";
+        if (!command.arguments.empty() && !memory_only)
+            return Response{
+                ErrorResponse{std::string(error_message(ErrorCode::unsupported_info_section))}};
+
+        std::string response;
+        if (!memory_only)
+        {
+            response += "# Server\r\n";
+            response += "uptime_seconds:" + std::to_string(stats.uptime_seconds) + "\r\n";
+            response += "connected_clients:" + std::to_string(stats.connected_clients) + "\r\n";
+            response += "# Keyspace\r\n";
+            response += "keys:" + std::to_string(stats.database.key_count) + "\r\n";
+            response += "evictions:" + std::to_string(stats.database.evictions) + "\r\n";
+            response += "expired_keys:" + std::to_string(stats.database.expired_keys) + "\r\n";
+        }
+        response += "# Memory\r\n";
+        response +=
+            "used_memory_bytes:" + std::to_string(stats.database.approximate_memory_bytes) + "\r\n";
+        response += "snapshot_bytes:" + std::to_string(stats.database.snapshot_bytes) + "\r\n";
+        response +=
+            "last_dump_unix_ms:" + std::to_string(stats.database.last_dump_unix_ms) + "\r\n";
+        return Response{BulkString{std::move(response)}};
+    }
 
     if (name == "SET")
     {

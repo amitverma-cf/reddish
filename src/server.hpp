@@ -38,6 +38,7 @@ class Server
     std::uint16_t port;
     Database database;
     bool running;
+    std::chrono::steady_clock::time_point started_at;
     Socket listen_socket;
     std::unordered_map<int, ClientInfo> clients;
     int next_client_id;

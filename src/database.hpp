@@ -31,6 +31,16 @@ struct Hash
     std::unordered_map<std::string, Value> fields;
 };
 
+struct DatabaseStats
+{
+    std::size_t key_count;
+    std::size_t approximate_memory_bytes;
+    std::size_t snapshot_bytes;
+    std::uint64_t evictions;
+    std::uint64_t expired_keys;
+    std::int64_t last_dump_unix_ms;
+};
+
 class Database
 {
   private:
@@ -48,6 +58,10 @@ class Database
     Store kv_store;
     KeyOrder lru_keys;
     std::size_t max_keys;
+    std::uint64_t evictions = 0;
+    std::uint64_t expired_keys = 0;
+    std::size_t snapshot_bytes = 0;
+    std::int64_t last_dump_unix_ms = -1;
 
   public:
     explicit Database(std::size_t max_keys = 1024);
@@ -74,6 +88,7 @@ class Database
     void remove_expired();
     Result<void> dump_to_disk(const std::filesystem::path &path);
     Result<void> load_from_disk(const std::filesystem::path &path);
+    DatabaseStats stats() const;
 
     bool del(const std::string &key);
 

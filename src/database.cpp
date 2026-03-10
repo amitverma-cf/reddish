@@ -138,6 +138,38 @@ bool read_database_value(std::ifstream &input, Value &value)
     return true;
 }
 
+std::size_t value_memory_bytes(const Value &value)
+{
+    return std::visit(
+        [](const auto &data) -> std::size_t
+        {
+            using Data = std::decay_t<decltype(data)>;
+            if constexpr (std::is_same_v<Data, std::string>)
+            {
+                return sizeof(data) + data.size();
+            }
+            else if constexpr (std::is_same_v<Data, std::int64_t>)
+            {
+                return sizeof(data);
+            }
+            else if constexpr (std::is_same_v<Data, ListPtr>)
+            {
+                std::size_t bytes = sizeof(List);
+                for (const auto &item : data->values)
+                    bytes += value_memory_bytes(item);
+                return bytes;
+            }
+            else
+            {
+                std::size_t bytes = sizeof(Hash);
+                for (const auto &[field, item] : data->fields)
+                    bytes += field.size() + value_memory_bytes(item);
+                return bytes;
+            }
+        },
+        value);
+}
+
 } // namespace
 
 Database::Database(std::size_t max_keys) : max_keys(max_keys == 0 ? 1 : max_keys) {}
@@ -405,6 +437,7 @@ void Database::remove_expired()
         {
             lru_keys.erase(entry->second.lru_position);
             entry = kv_store.erase(entry);
+            ++expired_keys;
         }
         else
         {
@@ -453,6 +486,12 @@ Result<void> Database::dump_to_disk(const std::filesystem::path &path)
         return std::unexpected(Error{ErrorCode::disk_write_failed});
     }
 
+    snapshot_bytes = static_cast<std::size_t>(std::filesystem::file_size(path, error));
+    if (error) return std::unexpected(Error{ErrorCode::disk_write_failed});
+    last_dump_unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+
     return {};
 }
 
@@ -500,6 +539,16 @@ Result<void> Database::load_from_disk(const std::filesystem::path &path)
     return {};
 }
 
+DatabaseStats Database::stats() const
+{
+    std::size_t memory_bytes = 0;
+    for (const auto &[key, entry] : kv_store)
+        memory_bytes += sizeof(Entry) + key.size() + value_memory_bytes(entry.value);
+
+    return {kv_store.size(), memory_bytes, snapshot_bytes,
+            evictions,       expired_keys, last_dump_unix_ms};
+}
+
 Database::Entry &Database::insert(const std::string &key, Value value)
 {
     evict_if_full();
@@ -517,6 +566,7 @@ Database::Store::iterator Database::find_active(const std::string &key)
     if (entry->second.expires_at && *entry->second.expires_at <= std::chrono::steady_clock::now())
     {
         erase(entry);
+        ++expired_keys;
         return kv_store.end();
     }
 
@@ -539,9 +589,9 @@ void Database::evict_if_full()
 {
     if (kv_store.size() < max_keys) return;
 
-    const std::string &key = lru_keys.back();
-    kv_store.erase(key);
-    lru_keys.pop_back();
+    const auto entry = kv_store.find(lru_keys.back());
+    erase(entry);
+    ++evictions;
 }
 
 } // namespace reddish

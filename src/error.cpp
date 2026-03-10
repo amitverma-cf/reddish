@@ -37,6 +37,8 @@ std::string_view error_message(ErrorCode code)
         return "ERR value is not an integer or out of range";
     case ErrorCode::wrong_type:
         return "WRONGTYPE Operation against a key holding the wrong kind of value";
+    case ErrorCode::unsupported_info_section:
+        return "ERR unsupported INFO section";
     case ErrorCode::request_too_large:
         return "ERR request exceeds maximum buffer size";
     case ErrorCode::disk_write_failed:

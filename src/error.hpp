@@ -23,6 +23,7 @@ enum class ErrorCode
     protocol_error_prefix,
     value_not_integer,
     wrong_type,
+    unsupported_info_section,
     request_too_large,
     disk_write_failed,
     disk_read_failed,

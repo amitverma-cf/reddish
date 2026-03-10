@@ -1,4 +1,5 @@
 #pragma once
+#include "database.hpp"
 #include "response.hpp"
 #include "result.hpp"
 #include <cstddef>
@@ -8,8 +9,6 @@
 namespace reddish
 {
 
-class Database;
-
 struct Command
 {
     std::string name;
@@ -17,9 +16,16 @@ struct Command
     std::size_t bytes_consumed = 0;
 };
 
+struct ServerStats
+{
+    DatabaseStats database;
+    std::size_t connected_clients;
+    std::int64_t uptime_seconds;
+};
+
 Result<Command> parse_command(const std::string &input);
 
-Response execute_command(const Command &command, Database &database);
+Response execute_command(const Command &command, Database &database, const ServerStats &stats);
 
 std::string encode_response(const Response &response);
 
