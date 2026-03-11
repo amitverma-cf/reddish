@@ -34,8 +34,17 @@ int main(int argc, char *argv[])
         std::signal(SIGINT, request_stop);
         std::signal(SIGTERM, request_stop);
 
-        std::uint16_t port = 6379;
+        reddish::ServerConfig config;
         std::optional<std::filesystem::path> dump_path;
+        const auto parse_positive_number = [](std::string_view input) -> std::optional<std::size_t>
+        {
+            std::size_t value = 0;
+            const auto [position, error] =
+                std::from_chars(input.data(), input.data() + input.size(), value);
+            if (error != std::errc{} || position != input.data() + input.size() || value == 0)
+                return std::nullopt;
+            return value;
+        };
         for (int index = 1; index < argc; ++index)
         {
             const std::string_view argument = argv[index];
@@ -43,26 +52,51 @@ int main(int argc, char *argv[])
             {
                 if (++index == argc)
                 {
-                    std::cerr << "Usage: reddish [port] [--load-dump <path>]\n";
+                    std::cerr << "Usage: reddish [port] [--max-keys <count>] [--dump-interval "
+                                 "<seconds>] [--dump-path <path>] [--load-dump <path>]\n";
                     return 1;
                 }
                 dump_path = argv[index];
                 continue;
             }
-
-            unsigned int parsed_port = 0;
-            const auto [position, error] =
-                std::from_chars(argument.data(), argument.data() + argument.size(), parsed_port);
-            if (error != std::errc{} || position != argument.data() + argument.size() ||
-                parsed_port == 0 || parsed_port > std::numeric_limits<std::uint16_t>::max())
+            if (argument == "--max-keys" || argument == "--dump-interval" ||
+                argument == "--dump-path")
             {
-                std::cerr << "Usage: reddish [port] [--load-dump <path>]\n";
+                if (++index == argc)
+                {
+                    std::cerr << "Usage: reddish [port] [--max-keys <count>] [--dump-interval "
+                                 "<seconds>] [--dump-path <path>] [--load-dump <path>]\n";
+                    return 1;
+                }
+                if (argument == "--dump-path")
+                {
+                    config.dump_path = argv[index];
+                    continue;
+                }
+
+                const auto value = parse_positive_number(argv[index]);
+                if (!value)
+                {
+                    std::cerr << "Usage: reddish [port] [--max-keys <count>] [--dump-interval "
+                                 "<seconds>] [--dump-path <path>] [--load-dump <path>]\n";
+                    return 1;
+                }
+                if (argument == "--max-keys") config.max_keys = *value;
+                else config.dump_interval = std::chrono::seconds(*value);
+                continue;
+            }
+
+            const auto parsed_port = parse_positive_number(argument);
+            if (!parsed_port || *parsed_port > std::numeric_limits<std::uint16_t>::max())
+            {
+                std::cerr << "Usage: reddish [port] [--max-keys <count>] [--dump-interval "
+                             "<seconds>] [--dump-path <path>] [--load-dump <path>]\n";
                 return 1;
             }
-            port = static_cast<std::uint16_t>(parsed_port);
+            config.port = static_cast<std::uint16_t>(*parsed_port);
         }
 
-        reddish::Server server(port);
+        reddish::Server server(config);
         if (dump_path && std::filesystem::exists(*dump_path))
         {
             const auto loaded = server.load_from_disk(*dump_path);

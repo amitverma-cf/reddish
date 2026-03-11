@@ -2,6 +2,7 @@
 #include "error.hpp"
 
 #include <iostream>
+#include <utility>
 #include <vector>
 
 namespace reddish
@@ -19,7 +20,10 @@ bool is_incomplete_resp_error(ErrorCode code)
 
 } // namespace
 
-Server::Server(std::uint16_t port) : port(port), running(false), next_client_id(0) {}
+Server::Server(ServerConfig config)
+    : config(std::move(config)), database(this->config.max_keys), running(false), next_client_id(0)
+{
+}
 
 Server::~Server()
 {
@@ -36,12 +40,12 @@ void Server::start(bool (*should_stop)())
     running = true;
     started_at = std::chrono::steady_clock::now();
     listen_socket.create_tcp();
-    listen_socket.bind(port);
+    listen_socket.bind(config.port);
     listen_socket.listen(128);
     listen_socket.set_nonblocking();
 
-    std::cout << "Server listening on port " << port << '\n';
-    auto next_dump = std::chrono::steady_clock::now() + dump_interval;
+    std::cout << "Server listening on port " << config.port << '\n';
+    auto next_dump = std::chrono::steady_clock::now() + config.dump_interval;
 
     while (running && !should_stop())
     {
@@ -54,9 +58,9 @@ void Server::start(bool (*should_stop)())
         database.remove_expired();
         if (std::chrono::steady_clock::now() >= next_dump)
         {
-            const auto dump = database.dump_to_disk("dump.reddish");
+            const auto dump = database.dump_to_disk(config.dump_path);
             if (!dump) throw dump.error();
-            next_dump = std::chrono::steady_clock::now() + dump_interval;
+            next_dump = std::chrono::steady_clock::now() + config.dump_interval;
         }
         for (const auto &event : events)
         {

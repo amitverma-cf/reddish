@@ -13,10 +13,18 @@
 namespace reddish
 {
 
+struct ServerConfig
+{
+    std::uint16_t port = 6379;
+    std::size_t max_keys = 1024;
+    std::chrono::seconds dump_interval = std::chrono::minutes(5);
+    std::filesystem::path dump_path = "dump.reddish";
+};
+
 class Server
 {
   public:
-    Server(std::uint16_t port = 6379);
+    explicit Server(ServerConfig config = {});
     ~Server();
 
     void start();
@@ -35,7 +43,7 @@ class Server
     };
 
     SocketSystem socket_system;
-    std::uint16_t port;
+    ServerConfig config;
     Database database;
     bool running;
     std::chrono::steady_clock::time_point started_at;
@@ -45,7 +53,6 @@ class Server
 
     static constexpr std::size_t max_input_buffer_size = 1024 * 1024;
     static constexpr int shutdown_poll_timeout_ms = 100;
-    static constexpr auto dump_interval = std::chrono::minutes(5);
 
     void accept_connections();
     void handle_client(int client_id);
