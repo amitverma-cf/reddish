@@ -92,6 +92,14 @@ void Server::start(bool (*should_stop)())
         }
     }
 
+    if (running)
+    {
+        const auto dump = database.dump_to_disk(config.dump_path);
+        stop();
+        if (!dump) throw dump.error();
+        return;
+    }
+
     stop();
 }
 
