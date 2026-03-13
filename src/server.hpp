@@ -52,12 +52,14 @@ class Server
     int next_client_id;
 
     static constexpr std::size_t max_input_buffer_size = 1024 * 1024;
+    static constexpr std::size_t max_output_buffer_size = 1024 * 1024;
     static constexpr int shutdown_poll_timeout_ms = 100;
 
     void accept_connections();
     void handle_client(int client_id);
     void flush_client(int client_id);
     void remove_client(int client_id);
+    bool queue_response(int client_id, const Response &response);
 };
 
 } // namespace reddish

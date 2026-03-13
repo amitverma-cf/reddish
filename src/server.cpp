@@ -145,10 +145,7 @@ void Server::handle_client(int client_id)
             client->second.buffer.append(buffer, bytes_received);
             if (client->second.buffer.size() > max_input_buffer_size)
             {
-                client->second.output_buffer += encode_response(Response{
-                    ErrorResponse{std::string(error_message(ErrorCode::request_too_large))}});
-                client->second.buffer.clear();
-                client->second.close_after_write = true;
+                remove_client(client_id);
                 return;
             }
             continue;
@@ -172,9 +169,11 @@ void Server::handle_client(int client_id)
         {
             if (is_incomplete_resp_error(command.error().code())) return;
 
-            client->second.output_buffer += encode_response(Response{
-                ErrorResponse{std::string(error_message(ErrorCode::protocol_error_prefix)) +
-                              std::string(error_message(command.error().code()))}});
+            if (!queue_response(client_id,
+                                Response{ErrorResponse{
+                                    std::string(error_message(ErrorCode::protocol_error_prefix)) +
+                                    std::string(error_message(command.error().code()))}}))
+                return;
             client->second.buffer.clear();
             client->second.close_after_write = true;
             return;
@@ -184,7 +183,7 @@ void Server::handle_client(int client_id)
                                 std::chrono::duration_cast<std::chrono::seconds>(
                                     std::chrono::steady_clock::now() - started_at)
                                     .count()};
-        client->second.output_buffer += encode_response(execute_command(*command, database, stats));
+        if (!queue_response(client_id, execute_command(*command, database, stats))) return;
         client->second.buffer.erase(0, command->bytes_consumed);
     }
 }
@@ -217,6 +216,22 @@ void Server::remove_client(int client_id)
     if (!clients.contains(client_id)) return;
     clients.erase(client_id);
     std::cout << "Client disconnected: " << client_id << '\n';
+}
+
+bool Server::queue_response(int client_id, const Response &response)
+{
+    const auto client = clients.find(client_id);
+    if (client == clients.end()) return false;
+
+    const auto encoded = encode_response(response);
+    if (client->second.output_buffer.size() + encoded.size() > max_output_buffer_size)
+    {
+        remove_client(client_id);
+        return false;
+    }
+
+    client->second.output_buffer += encoded;
+    return true;
 }
 
 } // namespace reddish
