@@ -520,6 +520,10 @@ Result<void> Database::load_from_disk(const std::filesystem::path &path)
         entries.emplace_back(std::move(key), expires_at, std::move(value));
     }
 
+    char trailing_byte = 0;
+    if (input.read(&trailing_byte, 1) || !input.eof())
+        return std::unexpected(Error{ErrorCode::disk_read_failed});
+
     kv_store.clear();
     lru_keys.clear();
 
