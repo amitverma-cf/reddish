@@ -115,7 +115,6 @@ bool read_database_value(std::ifstream &input, Value &value)
     if (type == 2)
     {
         auto list = std::make_shared<List>();
-        list->values.reserve(static_cast<std::size_t>(count));
         for (std::uint64_t index = 0; index < count; ++index)
         {
             Value item;
@@ -268,7 +267,7 @@ Result<std::optional<Value>> Database::pop_left(const std::string &key)
     if (values.empty()) return std::nullopt;
 
     Value value = std::move(values.front());
-    values.erase(values.begin());
+    values.pop_front();
     if (values.empty()) del(key);
     return value;
 }

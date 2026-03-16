@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <list>
 #include <memory>
@@ -23,7 +24,7 @@ using Value = std::variant<std::string, std::int64_t, ListPtr, HashPtr>;
 
 struct List
 {
-    std::vector<Value> values;
+    std::deque<Value> values;
 };
 
 struct Hash
