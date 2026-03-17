@@ -208,7 +208,11 @@ int Socket::receive(char *buffer, std::size_t length)
 
 int Socket::send(const char *data, std::size_t length)
 {
+#ifdef _WIN32
     return ::send(native_handle(handle_), data, static_cast<int>(length), 0);
+#else
+    return ::send(native_handle(handle_), data, length, MSG_NOSIGNAL);
+#endif
 }
 
 bool Socket::would_block() const
