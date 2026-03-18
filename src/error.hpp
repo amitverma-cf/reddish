@@ -27,6 +27,7 @@ enum class ErrorCode
     request_too_large,
     disk_write_failed,
     disk_read_failed,
+    dump_exceeds_key_capacity,
     socket_startup_failed,
     socket_poll_failed,
     socket_creation_failed,

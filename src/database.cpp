@@ -502,9 +502,9 @@ Result<void> Database::load_from_disk(const std::filesystem::path &path)
     constexpr std::uint64_t format_version = 1;
     std::uint64_t version = 0;
     std::uint64_t count = 0;
-    if (!read_value(input, version) || version != format_version || !read_value(input, count) ||
-        count > max_keys)
+    if (!read_value(input, version) || version != format_version || !read_value(input, count))
         return std::unexpected(Error{ErrorCode::disk_read_failed});
+    if (count > max_keys) return std::unexpected(Error{ErrorCode::dump_exceeds_key_capacity});
 
     std::vector<std::tuple<std::string, std::int64_t, Value>> entries;
     entries.reserve(static_cast<std::size_t>(count));
