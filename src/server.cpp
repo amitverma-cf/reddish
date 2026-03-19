@@ -145,6 +145,7 @@ void Server::handle_client(int client_id)
             client->second.buffer.append(buffer, bytes_received);
             if (client->second.buffer.size() > max_input_buffer_size)
             {
+                ++input_buffer_disconnects;
                 remove_client(client_id);
                 return;
             }
@@ -182,7 +183,8 @@ void Server::handle_client(int client_id)
         const ServerStats stats{database.stats(), clients.size(),
                                 std::chrono::duration_cast<std::chrono::seconds>(
                                     std::chrono::steady_clock::now() - started_at)
-                                    .count()};
+                                    .count(),
+                                input_buffer_disconnects, output_buffer_disconnects};
         if (!queue_response(client_id, execute_command(*command, database, stats))) return;
         client->second.buffer.erase(0, command->bytes_consumed);
     }
@@ -226,6 +228,7 @@ bool Server::queue_response(int client_id, const Response &response)
     const auto encoded = encode_response(response);
     if (client->second.output_buffer.size() + encoded.size() > max_output_buffer_size)
     {
+        ++output_buffer_disconnects;
         remove_client(client_id);
         return false;
     }

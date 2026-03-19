@@ -156,6 +156,12 @@ Response execute_command(const Command &command, Database &database, const Serve
             response += "# Server\r\n";
             response += "uptime_seconds:" + std::to_string(stats.uptime_seconds) + "\r\n";
             response += "connected_clients:" + std::to_string(stats.connected_clients) + "\r\n";
+            response +=
+                "input_buffer_disconnects:" + std::to_string(stats.input_buffer_disconnects) +
+                "\r\n";
+            response +=
+                "output_buffer_disconnects:" + std::to_string(stats.output_buffer_disconnects) +
+                "\r\n";
             response += "# Keyspace\r\n";
             response += "keys:" + std::to_string(stats.database.key_count) + "\r\n";
             response += "evictions:" + std::to_string(stats.database.evictions) + "\r\n";

@@ -50,6 +50,8 @@ class Server
     Socket listen_socket;
     std::unordered_map<int, ClientInfo> clients;
     int next_client_id;
+    std::uint64_t input_buffer_disconnects = 0;
+    std::uint64_t output_buffer_disconnects = 0;
 
     static constexpr std::size_t max_input_buffer_size = 1024 * 1024;
     static constexpr std::size_t max_output_buffer_size = 1024 * 1024;

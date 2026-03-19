@@ -21,6 +21,8 @@ struct ServerStats
     DatabaseStats database;
     std::size_t connected_clients;
     std::int64_t uptime_seconds;
+    std::uint64_t input_buffer_disconnects;
+    std::uint64_t output_buffer_disconnects;
 };
 
 Result<Command> parse_command(const std::string &input);
