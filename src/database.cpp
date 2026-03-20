@@ -10,6 +10,11 @@
 #include <tuple>
 #include <type_traits>
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 namespace reddish
 {
 
@@ -135,6 +140,19 @@ bool read_database_value(std::ifstream &input, Value &value)
     }
     value = std::move(hash);
     return true;
+}
+
+bool replace_dump_file(const std::filesystem::path &temporary_path,
+                       const std::filesystem::path &path)
+{
+#ifdef _WIN32
+    return MoveFileExW(temporary_path.c_str(), path.c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    std::error_code error;
+    std::filesystem::rename(temporary_path, path, error);
+    return !error;
+#endif
 }
 
 std::size_t value_memory_bytes(const Value &value)
@@ -475,16 +493,14 @@ Result<void> Database::dump_to_disk(const std::filesystem::path &path)
     output.close();
     if (!output) return std::unexpected(Error{ErrorCode::disk_write_failed});
 
-    std::error_code error;
-    std::filesystem::remove(path, error);
-    error.clear();
-    std::filesystem::rename(temporary_path, path, error);
-    if (error)
+    if (!replace_dump_file(temporary_path, path))
     {
+        std::error_code error;
         std::filesystem::remove(temporary_path, error);
         return std::unexpected(Error{ErrorCode::disk_write_failed});
     }
 
+    std::error_code error;
     snapshot_bytes = static_cast<std::size_t>(std::filesystem::file_size(path, error));
     if (error) return std::unexpected(Error{ErrorCode::disk_write_failed});
     last_dump_unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
