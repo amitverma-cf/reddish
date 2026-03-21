@@ -52,7 +52,8 @@ void Server::start(bool (*should_stop)())
         std::vector<SocketPollRequest> requests{{&listen_socket, false}};
         for (auto &[client_id, client] : clients)
             if (client.connected)
-                requests.push_back({&client.socket, !client.output_buffer.empty()});
+                requests.push_back(
+                    {&client.socket, client.output_offset < client.output_buffer.size()});
 
         const auto events = socket_system.wait_for_events(requests, shutdown_poll_timeout_ms);
         database.remove_expired();
@@ -143,10 +144,15 @@ void Server::handle_client(int client_id)
         if (bytes_received > 0)
         {
             client->second.buffer.append(buffer, bytes_received);
-            if (client->second.buffer.size() > max_input_buffer_size)
+            if (client->second.buffer.size() - client->second.input_offset > max_input_buffer_size)
             {
                 ++input_buffer_disconnects;
-                remove_client(client_id);
+                if (!queue_response(client_id, Response{ErrorResponse{std::string(
+                                                   error_message(ErrorCode::request_too_large))}}))
+                    return;
+                client->second.buffer.clear();
+                client->second.input_offset = 0;
+                client->second.close_after_write = true;
                 return;
             }
             continue;
@@ -163,9 +169,11 @@ void Server::handle_client(int client_id)
         return;
     }
 
-    while (!client->second.buffer.empty())
+    while (client->second.input_offset < client->second.buffer.size())
     {
-        const auto command = parse_command(client->second.buffer);
+        const auto input =
+            std::string_view(client->second.buffer).substr(client->second.input_offset);
+        const auto command = parse_command(input);
         if (!command)
         {
             if (is_incomplete_resp_error(command.error().code())) return;
@@ -186,7 +194,8 @@ void Server::handle_client(int client_id)
                                     .count(),
                                 input_buffer_disconnects, output_buffer_disconnects};
         if (!queue_response(client_id, execute_command(*command, database, stats))) return;
-        client->second.buffer.erase(0, command->bytes_consumed);
+        client->second.input_offset += command->bytes_consumed;
+        compact_buffer(client->second.buffer, client->second.input_offset);
     }
 }
 
@@ -195,13 +204,15 @@ void Server::flush_client(int client_id)
     auto client = clients.find(client_id);
     if (client == clients.end()) return;
 
-    while (!client->second.output_buffer.empty())
+    while (client->second.output_offset < client->second.output_buffer.size())
     {
-        const int bytes_sent = client->second.socket.send(client->second.output_buffer.data(),
-                                                          client->second.output_buffer.size());
+        const int bytes_sent = client->second.socket.send(
+            client->second.output_buffer.data() + client->second.output_offset,
+            client->second.output_buffer.size() - client->second.output_offset);
         if (bytes_sent > 0)
         {
-            client->second.output_buffer.erase(0, bytes_sent);
+            client->second.output_offset += static_cast<std::size_t>(bytes_sent);
+            compact_buffer(client->second.output_buffer, client->second.output_offset);
             continue;
         }
 
@@ -226,7 +237,8 @@ bool Server::queue_response(int client_id, const Response &response)
     if (client == clients.end()) return false;
 
     const auto encoded = encode_response(response);
-    if (client->second.output_buffer.size() + encoded.size() > max_output_buffer_size)
+    if (client->second.output_buffer.size() - client->second.output_offset + encoded.size() >
+        max_output_buffer_size)
     {
         ++output_buffer_disconnects;
         remove_client(client_id);
@@ -235,6 +247,20 @@ bool Server::queue_response(int client_id, const Response &response)
 
     client->second.output_buffer += encoded;
     return true;
+}
+
+void Server::compact_buffer(std::string &buffer, std::size_t &offset)
+{
+    if (offset == buffer.size())
+    {
+        buffer.clear();
+        offset = 0;
+    }
+    else if (offset >= compact_buffer_threshold && offset * 2 >= buffer.size())
+    {
+        buffer.erase(0, offset);
+        offset = 0;
+    }
 }
 
 } // namespace reddish

@@ -38,6 +38,8 @@ class Server
         Socket socket;
         std::string buffer;
         std::string output_buffer;
+        std::size_t input_offset = 0;
+        std::size_t output_offset = 0;
         bool connected = false;
         bool close_after_write = false;
     };
@@ -55,6 +57,7 @@ class Server
 
     static constexpr std::size_t max_input_buffer_size = 1024 * 1024;
     static constexpr std::size_t max_output_buffer_size = 1024 * 1024;
+    static constexpr std::size_t compact_buffer_threshold = 64 * 1024;
     static constexpr int shutdown_poll_timeout_ms = 100;
 
     void accept_connections();
@@ -62,6 +65,7 @@ class Server
     void flush_client(int client_id);
     void remove_client(int client_id);
     bool queue_response(int client_id, const Response &response);
+    static void compact_buffer(std::string &buffer, std::size_t &offset);
 };
 
 } // namespace reddish

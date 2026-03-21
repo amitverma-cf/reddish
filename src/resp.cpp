@@ -65,14 +65,14 @@ Result<std::int64_t> parse_integer(const std::string &input)
 
 } // namespace
 
-Result<Command> parse_command(const std::string &input)
+Result<Command> parse_command(std::string_view input)
 {
     std::size_t pos = 0;
     auto readline = [&]() -> Result<std::string>
     {
         size_t end = input.find("\r\n", pos);
         if (end == std::string::npos) return std::unexpected(Error{ErrorCode::missing_crlf});
-        std::string line = input.substr(pos, end - pos);
+        std::string line{input.substr(pos, end - pos)};
         pos = end + 2;
         return line;
     };

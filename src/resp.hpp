@@ -4,6 +4,7 @@
 #include "result.hpp"
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace reddish
@@ -25,7 +26,7 @@ struct ServerStats
     std::uint64_t output_buffer_disconnects;
 };
 
-Result<Command> parse_command(const std::string &input);
+Result<Command> parse_command(std::string_view input);
 
 Response execute_command(const Command &command, Database &database, const ServerStats &stats);
 
