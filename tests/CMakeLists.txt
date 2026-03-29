@@ -1,4 +1,5 @@
 add_executable(reddish_tests
+    database_tests.cpp
     error_tests.cpp
 )
 
