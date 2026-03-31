@@ -2,9 +2,11 @@ add_executable(reddish_tests
     database_tests.cpp
     error_tests.cpp
     resp_tests.cpp
+    server_tests.cpp
+    ${catch2_SOURCE_DIR}/extras/catch_amalgamated.cpp
 )
 
-target_link_libraries(reddish_tests PRIVATE reddish_core Catch2::Catch2WithMain)
+target_include_directories(reddish_tests PRIVATE ${catch2_SOURCE_DIR}/extras)
+target_link_libraries(reddish_tests PRIVATE reddish_core)
 
-include(Catch)
-catch_discover_tests(reddish_tests)
+add_test(NAME reddish_tests COMMAND reddish_tests)
