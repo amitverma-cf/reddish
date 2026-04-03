@@ -4,6 +4,7 @@ add_executable(reddish_tests
     main_tests.cpp
     resp_tests.cpp
     server_tests.cpp
+    socket_tests.cpp
     ${catch2_SOURCE_DIR}/extras/catch_amalgamated.cpp
 )
 
