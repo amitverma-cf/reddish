@@ -147,3 +147,40 @@ TEST_CASE("server accepts TCP commands and cleanly stops")
     CHECK(std::filesystem::exists(dump_path));
     std::filesystem::remove(dump_path, error);
 }
+
+TEST_CASE("server reports and disconnects an oversized input buffer")
+{
+    SocketSystem socket_system;
+    const auto port = find_open_port();
+    const auto dump_path =
+        std::filesystem::temp_directory_path() / "reddish-backpressure-test.reddish";
+    std::error_code error;
+    std::filesystem::remove(dump_path, error);
+
+    stop_server = false;
+    Server server({port, 32, std::chrono::hours(1), dump_path});
+    std::exception_ptr server_error;
+    std::thread thread(
+        [&]
+        {
+            try
+            {
+                server.start(should_stop_server);
+            }
+            catch (...)
+            {
+                server_error = std::current_exception();
+            }
+        });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    ClientSocket client;
+    REQUIRE(client.connect(port));
+    client.send_all("*1\r\n$2097152\r\n" + std::string(1024 * 1024 + 1, 'x'));
+    CHECK(client.receive_until("\r\n") == "-ERR request exceeds maximum buffer size\r\n");
+
+    stop_server = true;
+    thread.join();
+    CHECK_FALSE(server_error);
+    std::filesystem::remove(dump_path, error);
+}
