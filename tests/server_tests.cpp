@@ -184,3 +184,40 @@ TEST_CASE("server reports and disconnects an oversized input buffer")
     CHECK_FALSE(server_error);
     std::filesystem::remove(dump_path, error);
 }
+
+TEST_CASE("server reports malformed RESP before closing the connection")
+{
+    SocketSystem socket_system;
+    const auto port = find_open_port();
+    const auto dump_path = std::filesystem::temp_directory_path() / "reddish-protocol-test.reddish";
+    std::error_code error;
+    std::filesystem::remove(dump_path, error);
+
+    stop_server = false;
+    Server server({port, 32, std::chrono::hours(1), dump_path});
+    std::exception_ptr server_error;
+    std::thread thread(
+        [&]
+        {
+            try
+            {
+                server.start(should_stop_server);
+            }
+            catch (...)
+            {
+                server_error = std::current_exception();
+            }
+        });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    ClientSocket client;
+    REQUIRE(client.connect(port));
+    client.send_all("+not-resp\r\n");
+    CHECK(client.receive_until("\r\n") ==
+          "-ERR Protocol error: Expected RESP array prefix '*'\r\n");
+
+    stop_server = true;
+    thread.join();
+    CHECK_FALSE(server_error);
+    std::filesystem::remove(dump_path, error);
+}
