@@ -190,3 +190,23 @@ TEST_CASE("database snapshots round-trip and reject invalid input")
     remove_dump(path);
     remove_dump(corrupt_path);
 }
+
+TEST_CASE("database snapshots omit keys that expire before the dump")
+{
+    const auto path = temporary_dump_path("expired");
+    remove_dump(path);
+
+    Database source;
+    source.set("temporary", "value");
+    REQUIRE(source.expire("temporary", 1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    REQUIRE(source.dump_to_disk(path));
+
+    Database restored;
+    REQUIRE(restored.load_from_disk(path));
+    const auto value = restored.get("temporary");
+    REQUIRE(value);
+    CHECK_FALSE(*value);
+
+    remove_dump(path);
+}
