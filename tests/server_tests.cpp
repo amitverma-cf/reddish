@@ -89,6 +89,12 @@ class ClientSocket
         return response;
     }
 
+    bool receives_disconnect()
+    {
+        char byte = 0;
+        return ::recv(handle_, &byte, 1, 0) <= 0;
+    }
+
   private:
 #ifdef _WIN32
     SOCKET handle_;
@@ -215,6 +221,46 @@ TEST_CASE("server reports malformed RESP before closing the connection")
     client.send_all("+not-resp\r\n");
     CHECK(client.receive_until("\r\n") ==
           "-ERR Protocol error: Expected RESP array prefix '*'\r\n");
+
+    stop_server = true;
+    thread.join();
+    CHECK_FALSE(server_error);
+    std::filesystem::remove(dump_path, error);
+}
+
+TEST_CASE("server disconnects clients when queued responses exceed the output limit")
+{
+    SocketSystem socket_system;
+    const auto port = find_open_port();
+    const auto dump_path = std::filesystem::temp_directory_path() / "reddish-output-test.reddish";
+    std::error_code error;
+    std::filesystem::remove(dump_path, error);
+
+    stop_server = false;
+    Server server({port, 32, std::chrono::hours(1), dump_path});
+    std::exception_ptr server_error;
+    std::thread thread(
+        [&]
+        {
+            try
+            {
+                server.start(should_stop_server);
+            }
+            catch (...)
+            {
+                server_error = std::current_exception();
+            }
+        });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    ClientSocket client;
+    REQUIRE(client.connect(port));
+    const std::string value(600 * 1024, 'v');
+    client.send_all("*3\r\n$3\r\nSET\r\n$3\r\nbig\r\n$614400\r\n" + value + "\r\n");
+    REQUIRE(client.receive_until("\r\n") == "+OK\r\n");
+
+    client.send_all("*2\r\n$3\r\nGET\r\n$3\r\nbig\r\n*2\r\n$3\r\nGET\r\n$3\r\nbig\r\n");
+    CHECK(client.receives_disconnect());
 
     stop_server = true;
     thread.join();
