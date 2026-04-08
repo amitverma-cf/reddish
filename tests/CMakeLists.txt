@@ -19,6 +19,10 @@ add_test(NAME rejects_out_of_range_port COMMAND $<TARGET_FILE:reddish> 65536)
 add_test(NAME rejects_missing_flag_value COMMAND $<TARGET_FILE:reddish> --load-dump)
 add_test(NAME rejects_zero_max_keys COMMAND $<TARGET_FILE:reddish> --max-keys 0)
 add_test(NAME rejects_invalid_dump_interval COMMAND $<TARGET_FILE:reddish> --dump-interval bad)
+add_test(NAME rejects_missing_dump_path COMMAND $<TARGET_FILE:reddish> --dump-path)
+add_test(NAME rejects_invalid_max_keys COMMAND $<TARGET_FILE:reddish> --max-keys bad)
+add_test(NAME rejects_zero_dump_interval COMMAND $<TARGET_FILE:reddish> --dump-interval 0)
 
 set_tests_properties(rejects_zero_port rejects_out_of_range_port rejects_missing_flag_value
-                     rejects_zero_max_keys rejects_invalid_dump_interval PROPERTIES WILL_FAIL TRUE)
+                     rejects_zero_max_keys rejects_invalid_dump_interval rejects_missing_dump_path
+                     rejects_invalid_max_keys rejects_zero_dump_interval PROPERTIES WILL_FAIL TRUE)
