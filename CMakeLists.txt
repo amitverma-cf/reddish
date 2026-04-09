@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(REDDISH_ENABLE_COVERAGE "Enable LLVM source coverage instrumentation" OFF)
+option(REDDISH_BUILD_DOCS "Add the Doxygen documentation target when available" ON)
 
 if(MSVC)
     add_compile_options(/FS)
@@ -72,5 +73,47 @@ if(BUILD_TESTING)
     add_subdirectory(tests)
     if(REDDISH_ENABLE_COVERAGE)
         target_link_options(reddish_tests PRIVATE -fprofile-instr-generate)
+    endif()
+endif()
+
+if(REDDISH_BUILD_DOCS)
+    find_package(Doxygen QUIET)
+
+    if(DOXYGEN_FOUND)
+        include(FetchContent)
+        FetchContent_Declare(
+            doxygen-awesome-css
+            URL https://github.com/jothepro/doxygen-awesome-css/archive/refs/tags/v2.4.2.tar.gz
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        FetchContent_MakeAvailable(doxygen-awesome-css)
+        FetchContent_GetProperties(doxygen-awesome-css SOURCE_DIR AWESOME_CSS_DIR)
+
+        set(REDDISH_DOC_ASSETS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/docs/.assets)
+        configure_file(
+            ${CMAKE_CURRENT_SOURCE_DIR}/Doxyfile.in
+            ${CMAKE_CURRENT_BINARY_DIR}/Doxyfile
+            @ONLY
+        )
+
+        add_custom_target(docs
+            COMMAND ${DOXYGEN_EXECUTABLE} ${CMAKE_CURRENT_BINARY_DIR}/Doxyfile
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${REDDISH_DOC_ASSETS_DIR}/icons/lucide-folder.svg ${CMAKE_CURRENT_SOURCE_DIR}/docs/folderclosed.svg
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${REDDISH_DOC_ASSETS_DIR}/icons/lucide-folder.svg ${CMAKE_CURRENT_SOURCE_DIR}/docs/folderclosedd.svg
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${REDDISH_DOC_ASSETS_DIR}/icons/lucide-folder-open.svg ${CMAKE_CURRENT_SOURCE_DIR}/docs/folderopen.svg
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${REDDISH_DOC_ASSETS_DIR}/icons/lucide-folder-open.svg ${CMAKE_CURRENT_SOURCE_DIR}/docs/folderopend.svg
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${REDDISH_DOC_ASSETS_DIR}/icons/lucide-file-code.svg ${CMAKE_CURRENT_SOURCE_DIR}/docs/doc.svg
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${REDDISH_DOC_ASSETS_DIR}/icons/lucide-file-code.svg ${CMAKE_CURRENT_SOURCE_DIR}/docs/docd.svg
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${REDDISH_DOC_ASSETS_DIR}/icons/lucide-plus.svg ${CMAKE_CURRENT_SOURCE_DIR}/docs/plus.svg
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${REDDISH_DOC_ASSETS_DIR}/icons/lucide-plus.svg ${CMAKE_CURRENT_SOURCE_DIR}/docs/plusd.svg
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${REDDISH_DOC_ASSETS_DIR}/icons/lucide-minus.svg ${CMAKE_CURRENT_SOURCE_DIR}/docs/minus.svg
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${REDDISH_DOC_ASSETS_DIR}/icons/lucide-minus.svg ${CMAKE_CURRENT_SOURCE_DIR}/docs/minusd.svg
+            COMMAND ${CMAKE_COMMAND} -E rm -f ${CMAKE_CURRENT_SOURCE_DIR}/docs/doxygen.svg
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            COMMENT "Generating Doxygen documentation"
+            VERBATIM
+        )
+    else()
+        message(STATUS "Doxygen not found: documentation target is unavailable")
     endif()
 endif()
