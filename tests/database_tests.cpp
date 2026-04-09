@@ -187,6 +187,11 @@ TEST_CASE("database snapshots round-trip and reject invalid input")
     REQUIRE_FALSE(absent);
     CHECK(absent.error().code() == ErrorCode::disk_read_failed);
 
+    const auto unwritable_path = temporary_dump_path("missing-parent") / "dump.reddish";
+    const auto write_failure = restored.dump_to_disk(unwritable_path);
+    REQUIRE_FALSE(write_failure);
+    CHECK(write_failure.error().code() == ErrorCode::disk_write_failed);
+
     remove_dump(path);
     remove_dump(corrupt_path);
 }
