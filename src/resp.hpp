@@ -19,7 +19,6 @@ struct Command
 
 struct ServerStats
 {
-    DatabaseStats database;
     std::size_t connected_clients;
     std::int64_t uptime_seconds;
     std::uint64_t input_buffer_disconnects;

@@ -17,14 +17,14 @@ Command command(std::string name, std::vector<std::string> arguments = {})
     return {std::move(name), std::move(arguments), 0};
 }
 
-ServerStats stats_for(const Database &database)
+ServerStats stats_for()
 {
-    return {database.stats(), 3, 12, 4, 5};
+    return {3, 12, 4, 5};
 }
 
 std::string run(Database &database, Command input)
 {
-    return encode_response(execute_command(input, database, stats_for(database)));
+    return encode_response(execute_command(input, database, stats_for()));
 }
 
 void check_parse_error(std::string_view input, ErrorCode code)

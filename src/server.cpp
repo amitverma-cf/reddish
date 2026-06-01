@@ -188,7 +188,7 @@ void Server::handle_client(int client_id)
             return;
         }
 
-        const ServerStats stats{database.stats(), clients.size(),
+        const ServerStats stats{clients.size(),
                                 std::chrono::duration_cast<std::chrono::seconds>(
                                     std::chrono::steady_clock::now() - started_at)
                                     .count(),

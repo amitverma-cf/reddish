@@ -150,6 +150,7 @@ Response execute_command(const Command &command, Database &database, const Serve
             return Response{
                 ErrorResponse{std::string(error_message(ErrorCode::unsupported_info_section))}};
 
+        const auto database_stats = database.stats();
         std::string response;
         if (!memory_only)
         {
@@ -163,16 +164,16 @@ Response execute_command(const Command &command, Database &database, const Serve
                 "output_buffer_disconnects:" + std::to_string(stats.output_buffer_disconnects) +
                 "\r\n";
             response += "# Keyspace\r\n";
-            response += "keys:" + std::to_string(stats.database.key_count) + "\r\n";
-            response += "evictions:" + std::to_string(stats.database.evictions) + "\r\n";
-            response += "expired_keys:" + std::to_string(stats.database.expired_keys) + "\r\n";
+            response += "keys:" + std::to_string(database_stats.key_count) + "\r\n";
+            response += "evictions:" + std::to_string(database_stats.evictions) + "\r\n";
+            response += "expired_keys:" + std::to_string(database_stats.expired_keys) + "\r\n";
         }
         response += "# Memory\r\n";
         response +=
-            "used_memory_bytes:" + std::to_string(stats.database.approximate_memory_bytes) + "\r\n";
-        response += "snapshot_bytes:" + std::to_string(stats.database.snapshot_bytes) + "\r\n";
+            "used_memory_bytes:" + std::to_string(database_stats.approximate_memory_bytes) + "\r\n";
+        response += "snapshot_bytes:" + std::to_string(database_stats.snapshot_bytes) + "\r\n";
         response +=
-            "last_dump_unix_ms:" + std::to_string(stats.database.last_dump_unix_ms) + "\r\n";
+            "last_dump_unix_ms:" + std::to_string(database_stats.last_dump_unix_ms) + "\r\n";
         return Response{BulkString{std::move(response)}};
     }
 
