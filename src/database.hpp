@@ -8,6 +8,7 @@
 #include <list>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -54,11 +55,28 @@ class Database
         std::optional<std::chrono::steady_clock::time_point> expires_at;
     };
 
+    struct Expiry
+    {
+        std::chrono::steady_clock::time_point deadline;
+        std::string key;
+    };
+
+    struct ExpiryLater
+    {
+        bool operator()(const Expiry &left, const Expiry &right) const
+        {
+            return left.deadline > right.deadline;
+        }
+    };
+
     using Store = std::unordered_map<std::string, Entry>;
+    using ExpiryQueue = std::priority_queue<Expiry, std::vector<Expiry>, ExpiryLater>;
 
     Store kv_store;
     KeyOrder lru_keys;
+    ExpiryQueue expirations;
     std::size_t max_keys;
+    std::size_t ttl_key_count = 0;
     std::uint64_t evictions = 0;
     std::uint64_t expired_keys = 0;
     std::size_t snapshot_bytes = 0;
@@ -103,6 +121,8 @@ class Database
     void erase(Store::iterator entry);
     void touch(Store::iterator entry);
     void evict_if_full();
+    void schedule_expiry(const std::string &key, std::chrono::steady_clock::time_point deadline);
+    void clear_expiry(Entry &entry);
 };
 
 } // namespace reddish

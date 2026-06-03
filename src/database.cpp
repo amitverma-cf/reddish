@@ -197,7 +197,7 @@ void Database::set(const std::string &key, const std::string &val)
     if (entry != kv_store.end())
     {
         entry->second.value = val;
-        entry->second.expires_at.reset();
+        clear_expiry(entry->second);
         touch(entry);
         return;
     }
@@ -427,7 +427,10 @@ bool Database::expire(const std::string &key, std::int64_t seconds)
         return true;
     }
 
-    entry->second.expires_at = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+    if (!entry->second.expires_at) ++ttl_key_count;
+    entry->second.expires_at = deadline;
+    schedule_expiry(key, deadline);
     touch(entry);
     return true;
 }
@@ -447,19 +450,21 @@ std::int64_t Database::ttl(const std::string &key)
 
 void Database::remove_expired()
 {
+    if (ttl_key_count == 0) return;
+
     const auto now = std::chrono::steady_clock::now();
-    for (auto entry = kv_store.begin(); entry != kv_store.end();)
+    while (!expirations.empty() && expirations.top().deadline <= now)
     {
-        if (entry->second.expires_at && *entry->second.expires_at <= now)
-        {
-            lru_keys.erase(entry->second.lru_position);
-            entry = kv_store.erase(entry);
-            ++expired_keys;
-        }
-        else
-        {
-            ++entry;
-        }
+        const auto expiry = expirations.top();
+        expirations.pop();
+
+        const auto entry = kv_store.find(expiry.key);
+        if (entry == kv_store.end() || !entry->second.expires_at ||
+            *entry->second.expires_at != expiry.deadline)
+            continue;
+
+        erase(entry);
+        ++expired_keys;
     }
 }
 
@@ -541,6 +546,8 @@ Result<void> Database::load_from_disk(const std::filesystem::path &path)
 
     kv_store.clear();
     lru_keys.clear();
+    expirations = {};
+    ttl_key_count = 0;
 
     const auto system_now = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::system_clock::now().time_since_epoch())
@@ -551,8 +558,13 @@ Result<void> Database::load_from_disk(const std::filesystem::path &path)
 
         auto &entry = insert(key, std::move(value));
         if (expires_at >= 0)
-            entry.expires_at = std::chrono::steady_clock::now() +
-                               std::chrono::milliseconds(expires_at - system_now);
+        {
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(expires_at - system_now);
+            entry.expires_at = deadline;
+            ++ttl_key_count;
+            schedule_expiry(key, deadline);
+        }
     }
 
     return {};
@@ -594,6 +606,7 @@ Database::Store::iterator Database::find_active(const std::string &key)
 
 void Database::erase(Store::iterator entry)
 {
+    if (entry->second.expires_at) --ttl_key_count;
     lru_keys.erase(entry->second.lru_position);
     kv_store.erase(entry);
 }
@@ -611,6 +624,19 @@ void Database::evict_if_full()
     const auto entry = kv_store.find(lru_keys.back());
     erase(entry);
     ++evictions;
+}
+
+void Database::schedule_expiry(const std::string &key,
+                               std::chrono::steady_clock::time_point deadline)
+{
+    expirations.push({deadline, key});
+}
+
+void Database::clear_expiry(Entry &entry)
+{
+    if (!entry.expires_at) return;
+    entry.expires_at.reset();
+    --ttl_key_count;
 }
 
 } // namespace reddish

@@ -141,6 +141,34 @@ TEST_CASE("database expires keys and evicts least recently used keys")
     CHECK(database.ttl("persistent") == -2);
 }
 
+TEST_CASE("database ignores stale expiry records")
+{
+    Database database;
+    database.set("key", "value");
+    REQUIRE(database.expire("key", 1));
+    REQUIRE(database.expire("key", 2));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    database.remove_expired();
+
+    const auto value = database.get("key");
+    REQUIRE(value);
+    REQUIRE(*value);
+    CHECK(**value == "value");
+
+    database.set("persistent", "value");
+    REQUIRE(database.expire("persistent", 1));
+    database.set("persistent", "new-value");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    database.remove_expired();
+
+    const auto persistent = database.get("persistent");
+    REQUIRE(persistent);
+    REQUIRE(*persistent);
+    CHECK(**persistent == "new-value");
+}
+
 TEST_CASE("database snapshots round-trip and reject invalid input")
 {
     const auto path = temporary_dump_path("snapshot");
