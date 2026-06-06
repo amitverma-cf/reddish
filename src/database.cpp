@@ -191,21 +191,21 @@ std::size_t value_memory_bytes(const Value &value)
 
 Database::Database(std::size_t max_keys) : max_keys(max_keys == 0 ? 1 : max_keys) {}
 
-void Database::set(const std::string &key, const std::string &val)
+void Database::set(std::string_view key, std::string_view val)
 {
     const auto entry = find_active(key);
     if (entry != kv_store.end())
     {
-        entry->second.value = val;
+        entry->second.value = std::string{val};
         clear_expiry(entry->second);
         touch(entry);
         return;
     }
 
-    insert(key, val);
+    insert(key, std::string{val});
 }
 
-Result<std::optional<std::string>> Database::get(const std::string &key)
+Result<std::optional<std::string>> Database::get(std::string_view key)
 {
     auto it = find_active(key);
     if (it == Database::kv_store.end()) return std::nullopt;
@@ -580,16 +580,16 @@ DatabaseStats Database::stats() const
             evictions,       expired_keys, last_dump_unix_ms};
 }
 
-Database::Entry &Database::insert(const std::string &key, Value value)
+Database::Entry &Database::insert(std::string_view key, Value value)
 {
     evict_if_full();
-    lru_keys.push_front(key);
+    lru_keys.emplace_front(key);
     auto [entry, inserted] =
         kv_store.emplace(key, Entry{std::move(value), lru_keys.begin(), std::nullopt});
     return entry->second;
 }
 
-Database::Store::iterator Database::find_active(const std::string &key)
+Database::Store::iterator Database::find_active(std::string_view key)
 {
     const auto entry = kv_store.find(key);
     if (entry == kv_store.end()) return entry;

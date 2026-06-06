@@ -12,8 +12,8 @@ namespace reddish
 
 struct Command
 {
-    std::string name;
-    std::vector<std::string> arguments;
+    std::string_view name;
+    std::vector<std::string_view> arguments;
     std::size_t bytes_consumed = 0;
 };
 

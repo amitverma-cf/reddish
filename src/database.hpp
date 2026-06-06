@@ -10,12 +10,35 @@
 #include <optional>
 #include <queue>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <variant>
 #include <vector>
 
 namespace reddish
 {
+
+struct StringHash
+{
+    using is_transparent = void;
+    std::size_t operator()(std::string_view value) const
+    {
+        return std::hash<std::string_view>{}(value);
+    }
+    std::size_t operator()(const std::string &value) const
+    {
+        return (*this)(std::string_view{value});
+    }
+};
+
+struct StringEqual
+{
+    using is_transparent = void;
+    bool operator()(std::string_view left, std::string_view right) const
+    {
+        return left == right;
+    }
+};
 
 struct List;
 struct Hash;
@@ -30,7 +53,7 @@ struct List
 
 struct Hash
 {
-    std::unordered_map<std::string, Value> fields;
+    std::unordered_map<std::string, Value, StringHash, StringEqual> fields;
 };
 
 struct DatabaseStats
@@ -69,7 +92,7 @@ class Database
         }
     };
 
-    using Store = std::unordered_map<std::string, Entry>;
+    using Store = std::unordered_map<std::string, Entry, StringHash, StringEqual>;
     using ExpiryQueue = std::priority_queue<Expiry, std::vector<Expiry>, ExpiryLater>;
 
     Store kv_store;
@@ -85,9 +108,9 @@ class Database
   public:
     explicit Database(std::size_t max_keys = 1024);
 
-    void set(const std::string &key, const std::string &val);
+    void set(std::string_view key, std::string_view val);
 
-    Result<std::optional<std::string>> get(const std::string &key);
+    Result<std::optional<std::string>> get(std::string_view key);
 
     Result<std::int64_t> increment(const std::string &key);
 
@@ -116,8 +139,8 @@ class Database
     Result<ListPtr> find_list(const std::string &key);
     Result<HashPtr> get_or_create_hash(const std::string &key);
     Result<HashPtr> find_hash(const std::string &key);
-    Entry &insert(const std::string &key, Value value);
-    Store::iterator find_active(const std::string &key);
+    Entry &insert(std::string_view key, Value value);
+    Store::iterator find_active(std::string_view key);
     void erase(Store::iterator entry);
     void touch(Store::iterator entry);
     void evict_if_full();

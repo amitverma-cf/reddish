@@ -12,9 +12,9 @@ using namespace reddish;
 namespace
 {
 
-Command command(std::string name, std::vector<std::string> arguments = {})
+Command command(std::string_view name, std::initializer_list<std::string_view> arguments = {})
 {
-    return {std::move(name), std::move(arguments), 0};
+    return {name, {arguments}, 0};
 }
 
 ServerStats stats_for()
