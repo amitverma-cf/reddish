@@ -21,6 +21,8 @@ local
 build
 output
 out
+/benchmarks/results/*
+!/benchmarks/results/.gitkeep
 # Compiled object files
 *.o
 *.obj
