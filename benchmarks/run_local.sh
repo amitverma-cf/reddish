@@ -66,5 +66,8 @@ for entry in "reddish:6380" "redis:6381" "valkey:6382"; do
   done
 done
 
-awk -F, 'NR == 1 { next } { key = $1 FS $2; ops[key] += $4; p99[key] += $7; count[key]++ } END { print "server,workload,samples,average_ops_per_sec,average_p99_latency_ms"; for (key in count) { split(key, fields, FS); printf "%s,%s,%d,%.2f,%.5f\n", fields[1], fields[2], count[key], ops[key] / count[key], p99[key] / count[key] } }' "$RESULT_DIR/results.csv" | sort >"$RESULT_DIR/summary.csv"
+{
+  echo "server,workload,samples,average_ops_per_sec,average_p99_latency_ms"
+  awk -F, 'NR == 1 { next } { key = $1 FS $2; ops[key] += $4; p99[key] += $7; count[key]++ } END { for (key in count) { split(key, fields, FS); printf "%s,%s,%d,%.2f,%.5f\n", fields[1], fields[2], count[key], ops[key] / count[key], p99[key] / count[key] } }' "$RESULT_DIR/results.csv" | sort
+} >"$RESULT_DIR/summary.csv"
 echo "Results: $RESULT_DIR/summary.csv"
