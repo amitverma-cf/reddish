@@ -19,7 +19,7 @@ combined_md=$(mktemp)
   echo '<!-- generated-results:start -->'
   echo '## Published results'
   echo
-  echo "Aggregated from ${#files[@]} local run directories. No hostname, username, IP address, or filesystem path is included."
+  echo "Aggregated from ${#files[@]} local run directories."
   echo
   echo '### System and toolchain'
   echo
