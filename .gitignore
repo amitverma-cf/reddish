@@ -16,9 +16,9 @@ vscode/
 .vscode/
 cache/
 clangd/
-docs/
 local
 build
+build*
 output
 out
 /benchmarks/results/*/*
