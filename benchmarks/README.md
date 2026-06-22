@@ -6,6 +6,10 @@ The runner uses the same keyspace, value size, client count, pipeline depth, war
 
 Each run writes reviewed aggregates (`results.csv`, `summary.csv`) beside a `temp/` directory containing raw logs and memtier output. The entire run directory stays untracked; copy only reviewed aggregate results into `benchmarks.md` for publication.
 
+## GitHub Actions
+
+The **Benchmark summary** workflow can be started manually from the repository's Actions page. It runs the same script on a Linux GitHub-hosted runner, regenerates `benchmarks.md` and the marked benchmark-summary section in the root `README.md`, then commits those files only when they changed. GitHub-hosted runner results are useful for repeatability, but they must not be combined with local samples because the hardware differs.
+
 ```bash
 KEYS=100000 VALUE_BYTES=64 CLIENTS=50 PIPELINE=32 DURATION_SECONDS=60 bash benchmarks/run_local.sh
 ```

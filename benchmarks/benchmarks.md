@@ -7,6 +7,8 @@ This is a narrow loopback benchmark using 32-byte values, one memtier worker, te
 <!-- generated-results:start -->
 ## Published results
 
+Aggregated from 1 local run directories.
+
 ### System and toolchain
 
 - OS: Debian GNU/Linux 13
