@@ -37,7 +37,7 @@ ctest --test-dir build -C Release --output-on-failure
 
 The server executable is written to `build/output/Release/reddish.exe`.
 
-### Linux or WSL
+### Linux
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
@@ -119,9 +119,22 @@ bash benchmarks/run_local.sh
 
 See [benchmarks/README.md](benchmarks/README.md) for setup and [benchmarks/benchmarks.md](benchmarks/benchmarks.md) for published local results.
 
+<!-- benchmark-summary:start -->
+### Latest benchmark summary
+
+Generated from the aggregate in [the full benchmark report](benchmarks/benchmarks.md). This is a loopback GET/SET measurement, not a general Redis or Valkey comparison.
+
+| Workload | Reddish ops/s | Redis ops/s | Valkey ops/s |
+|---|---:|---:|---:|
+| Read (GET) | 504k | 446k | 472k |
+| Write (SET) | 454k | 433k | 404k |
+| Mixed (50/50) | 474k | 453k | 441k |
+
+<!-- benchmark-summary:end -->
+
 ## API documentation
 
-Doxygen output is committed in [`docs/`](docs/index.html). To regenerate it in WSL:
+Doxygen output is committed in [`docs/`](docs/index.html). To regenerate it on Linux:
 
 ```bash
 cmake -S . -B build-docs -DREDDISH_BUILD_DOCS=ON
