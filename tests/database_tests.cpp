@@ -141,6 +141,23 @@ TEST_CASE("database expires keys and evicts least recently used keys")
     CHECK(database.ttl("persistent") == -2);
 }
 
+TEST_CASE("database LRU key views survive keyspace rehashing")
+{
+    Database database(257);
+    for (int index = 0; index < 257; ++index)
+        database.set("key-" + std::to_string(index), "value");
+
+    REQUIRE(database.get("key-0"));
+    database.set("overflow", "value");
+
+    const auto most_recent = database.get("key-0");
+    const auto evicted = database.get("key-1");
+    REQUIRE(most_recent);
+    CHECK(*most_recent);
+    REQUIRE(evicted);
+    CHECK_FALSE(*evicted);
+}
+
 TEST_CASE("database ignores stale expiry records")
 {
     Database database;

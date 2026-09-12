@@ -3,7 +3,7 @@
 #include "error.hpp"
 
 #include <algorithm>
-#include <exception>
+#include <charconv>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -196,7 +196,9 @@ void Database::set(std::string_view key, std::string_view val)
     const auto entry = find_active(key);
     if (entry != kv_store.end())
     {
-        entry->second.value = std::string{val};
+        if (auto *string = std::get_if<std::string>(&entry->second.value))
+            string->assign(val.data(), val.size());
+        else entry->second.value = std::string{val};
         clear_expiry(entry->second);
         touch(entry);
         return;
@@ -207,17 +209,25 @@ void Database::set(std::string_view key, std::string_view val)
 
 Result<std::optional<std::string>> Database::get(std::string_view key)
 {
-    auto it = find_active(key);
-    if (it == Database::kv_store.end()) return std::nullopt;
-    touch(it);
+    const auto value = get_value(key);
+    if (!value) return std::unexpected(value.error());
+    if (!*value) return std::nullopt;
 
-    if (const auto *string = std::get_if<std::string>(&it->second.value)) return *string;
-    if (const auto *integer = std::get_if<std::int64_t>(&it->second.value))
+    if (const auto *string = std::get_if<std::string>(&value->value().get())) return *string;
+    if (const auto *integer = std::get_if<std::int64_t>(&value->value().get()))
         return std::to_string(*integer);
     return std::unexpected(Error{ErrorCode::wrong_type});
 }
 
-Result<std::int64_t> Database::increment(const std::string &key)
+Result<std::optional<std::reference_wrapper<const Value>>> Database::get_value(std::string_view key)
+{
+    auto it = find_active(key);
+    if (it == kv_store.end()) return std::nullopt;
+    touch(it);
+    return std::cref(it->second.value);
+}
+
+Result<std::int64_t> Database::increment(std::string_view key)
 {
     auto it = find_active(key);
     if (it == kv_store.end())
@@ -239,25 +249,18 @@ Result<std::int64_t> Database::increment(const std::string &key)
         std::holds_alternative<HashPtr>(it->second.value))
         return std::unexpected(Error{ErrorCode::wrong_type});
 
-    try
-    {
-        std::size_t consumed = 0;
-        const auto integer = std::stoll(std::get<std::string>(it->second.value), &consumed);
-        if (consumed != std::get<std::string>(it->second.value).size())
-            return std::unexpected(Error{ErrorCode::value_not_integer});
-        if (integer == std::numeric_limits<std::int64_t>::max())
-            return std::unexpected(Error{ErrorCode::value_not_integer});
-
-        it->second.value = integer + 1;
-        return integer + 1;
-    }
-    catch (const std::exception &)
-    {
+    const auto &text = std::get<std::string>(it->second.value);
+    std::int64_t integer = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), integer);
+    if (error != std::errc{} || end != text.data() + text.size() ||
+        integer == std::numeric_limits<std::int64_t>::max())
         return std::unexpected(Error{ErrorCode::value_not_integer});
-    }
+
+    it->second.value = integer + 1;
+    return integer + 1;
 }
 
-Result<std::int64_t> Database::push_left(const std::string &key, Value value)
+Result<std::int64_t> Database::push_left(std::string_view key, Value value)
 {
     auto list = get_or_create_list(key);
     if (!list) return std::unexpected(list.error());
@@ -266,7 +269,7 @@ Result<std::int64_t> Database::push_left(const std::string &key, Value value)
     return static_cast<std::int64_t>((*list)->values.size());
 }
 
-Result<std::int64_t> Database::push_right(const std::string &key, Value value)
+Result<std::int64_t> Database::push_right(std::string_view key, Value value)
 {
     auto list = get_or_create_list(key);
     if (!list) return std::unexpected(list.error());
@@ -275,7 +278,7 @@ Result<std::int64_t> Database::push_right(const std::string &key, Value value)
     return static_cast<std::int64_t>((*list)->values.size());
 }
 
-Result<std::optional<Value>> Database::pop_left(const std::string &key)
+Result<std::optional<Value>> Database::pop_left(std::string_view key)
 {
     auto list = find_list(key);
     if (!list) return std::unexpected(list.error());
@@ -290,7 +293,7 @@ Result<std::optional<Value>> Database::pop_left(const std::string &key)
     return value;
 }
 
-Result<std::optional<Value>> Database::pop_right(const std::string &key)
+Result<std::optional<Value>> Database::pop_right(std::string_view key)
 {
     auto list = find_list(key);
     if (!list) return std::unexpected(list.error());
@@ -305,7 +308,7 @@ Result<std::optional<Value>> Database::pop_right(const std::string &key)
     return value;
 }
 
-Result<std::int64_t> Database::list_length(const std::string &key)
+Result<std::int64_t> Database::list_length(std::string_view key)
 {
     auto list = find_list(key);
     if (!list) return std::unexpected(list.error());
@@ -314,17 +317,17 @@ Result<std::int64_t> Database::list_length(const std::string &key)
     return static_cast<std::int64_t>((*list)->values.size());
 }
 
-Result<std::int64_t> Database::hash_set(const std::string &key, const std::string &field,
-                                        Value value)
+Result<std::int64_t> Database::hash_set(std::string_view key, std::string_view field, Value value)
 {
     auto hash = get_or_create_hash(key);
     if (!hash) return std::unexpected(hash.error());
 
-    const auto [entry, inserted] = (*hash)->fields.insert_or_assign(field, std::move(value));
+    const auto [entry, inserted] =
+        (*hash)->fields.insert_or_assign(std::string{field}, std::move(value));
     return inserted ? 1 : 0;
 }
 
-Result<std::optional<Value>> Database::hash_get(const std::string &key, const std::string &field)
+Result<std::optional<Value>> Database::hash_get(std::string_view key, std::string_view field)
 {
     auto hash = find_hash(key);
     if (!hash) return std::unexpected(hash.error());
@@ -335,18 +338,20 @@ Result<std::optional<Value>> Database::hash_get(const std::string &key, const st
     return value->second;
 }
 
-Result<bool> Database::hash_del(const std::string &key, const std::string &field)
+Result<bool> Database::hash_del(std::string_view key, std::string_view field)
 {
     auto hash = find_hash(key);
     if (!hash) return std::unexpected(hash.error());
     if (*hash == nullptr) return false;
 
-    const bool removed = (*hash)->fields.erase(field) > 0;
+    const auto field_entry = (*hash)->fields.find(field);
+    const bool removed = field_entry != (*hash)->fields.end();
+    if (removed) (*hash)->fields.erase(field_entry);
     if ((*hash)->fields.empty()) del(key);
     return removed;
 }
 
-Result<std::int64_t> Database::hash_length(const std::string &key)
+Result<std::int64_t> Database::hash_length(std::string_view key)
 {
     auto hash = find_hash(key);
     if (!hash) return std::unexpected(hash.error());
@@ -355,7 +360,7 @@ Result<std::int64_t> Database::hash_length(const std::string &key)
     return static_cast<std::int64_t>((*hash)->fields.size());
 }
 
-Result<ListPtr> Database::get_or_create_list(const std::string &key)
+Result<ListPtr> Database::get_or_create_list(std::string_view key)
 {
     auto it = find_active(key);
     if (it == kv_store.end())
@@ -372,7 +377,7 @@ Result<ListPtr> Database::get_or_create_list(const std::string &key)
     return std::unexpected(Error{ErrorCode::wrong_type});
 }
 
-Result<ListPtr> Database::find_list(const std::string &key)
+Result<ListPtr> Database::find_list(std::string_view key)
 {
     const auto it = find_active(key);
     if (it == kv_store.end()) return nullptr;
@@ -381,7 +386,7 @@ Result<ListPtr> Database::find_list(const std::string &key)
     return std::unexpected(Error{ErrorCode::wrong_type});
 }
 
-Result<HashPtr> Database::get_or_create_hash(const std::string &key)
+Result<HashPtr> Database::get_or_create_hash(std::string_view key)
 {
     auto it = find_active(key);
     if (it == kv_store.end())
@@ -398,7 +403,7 @@ Result<HashPtr> Database::get_or_create_hash(const std::string &key)
     return std::unexpected(Error{ErrorCode::wrong_type});
 }
 
-Result<HashPtr> Database::find_hash(const std::string &key)
+Result<HashPtr> Database::find_hash(std::string_view key)
 {
     const auto it = find_active(key);
     if (it == kv_store.end()) return nullptr;
@@ -407,7 +412,7 @@ Result<HashPtr> Database::find_hash(const std::string &key)
     return std::unexpected(Error{ErrorCode::wrong_type});
 }
 
-bool Database::del(const std::string &key)
+bool Database::del(std::string_view key)
 {
     const auto entry = find_active(key);
     if (entry == kv_store.end()) return false;
@@ -416,7 +421,7 @@ bool Database::del(const std::string &key)
     return true;
 }
 
-bool Database::expire(const std::string &key, std::int64_t seconds)
+bool Database::expire(std::string_view key, std::int64_t seconds)
 {
     const auto entry = find_active(key);
     if (entry == kv_store.end()) return false;
@@ -435,7 +440,7 @@ bool Database::expire(const std::string &key, std::int64_t seconds)
     return true;
 }
 
-std::int64_t Database::ttl(const std::string &key)
+std::int64_t Database::ttl(std::string_view key)
 {
     const auto entry = find_active(key);
     if (entry == kv_store.end()) return -2;
@@ -544,8 +549,8 @@ Result<void> Database::load_from_disk(const std::filesystem::path &path)
     if (input.read(&trailing_byte, 1) || !input.eof())
         return std::unexpected(Error{ErrorCode::disk_read_failed});
 
-    kv_store.clear();
     lru_keys.clear();
+    kv_store.clear();
     expirations = {};
     ttl_key_count = 0;
 
@@ -583,9 +588,20 @@ DatabaseStats Database::stats() const
 Database::Entry &Database::insert(std::string_view key, Value value)
 {
     evict_if_full();
-    lru_keys.emplace_front(key);
     auto [entry, inserted] =
-        kv_store.emplace(key, Entry{std::move(value), lru_keys.begin(), std::nullopt});
+        kv_store.emplace(key, Entry{std::move(value), KeyOrder::iterator{}, std::nullopt});
+    if (!inserted) return entry->second;
+
+    try
+    {
+        entry->second.lru_position =
+            lru_keys.emplace(lru_keys.begin(), std::string_view{entry->first});
+    }
+    catch (...)
+    {
+        kv_store.erase(entry);
+        throw;
+    }
     return entry->second;
 }
 
@@ -626,10 +642,9 @@ void Database::evict_if_full()
     ++evictions;
 }
 
-void Database::schedule_expiry(const std::string &key,
-                               std::chrono::steady_clock::time_point deadline)
+void Database::schedule_expiry(std::string_view key, std::chrono::steady_clock::time_point deadline)
 {
-    expirations.push({deadline, key});
+    expirations.push({deadline, std::string{key}});
 }
 
 void Database::clear_expiry(Entry &entry)

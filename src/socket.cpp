@@ -105,7 +105,8 @@ std::vector<SocketPollEvent> SocketSystem::wait_for_events(
 #endif
         const bool error = (poll_fds[index].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0;
         if (readable || writable || error)
-            result.push_back({requests[index].socket, readable, writable, error});
+            result.push_back(
+                {requests[index].socket, requests[index].client_id, readable, writable, error});
     }
 
     return result;
