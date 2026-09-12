@@ -126,9 +126,9 @@ Generated from the aggregate in [the full benchmark report](benchmarks/benchmark
 
 | Workload | Reddish ops/s | Redis ops/s | Valkey ops/s |
 |---|---:|---:|---:|
-| Read (GET) | 504k | 446k | 472k |
-| Write (SET) | 454k | 433k | 404k |
-| Mixed (50/50) | 474k | 453k | 441k |
+| Read (GET) | 1048k | 1456k | 1495k |
+| Write (SET) | 1169k | 1312k | 1327k |
+| Mixed (50/50) | 1014k | 1404k | 1411k |
 
 <!-- benchmark-summary:end -->
 
