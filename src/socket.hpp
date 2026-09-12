@@ -12,12 +12,14 @@ class Socket;
 struct SocketPollRequest
 {
     Socket *socket;
+    int client_id;
     bool watch_writable;
 };
 
 struct SocketPollEvent
 {
     Socket *socket;
+    int client_id;
     bool readable;
     bool writable;
     bool error;

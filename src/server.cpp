@@ -49,11 +49,13 @@ void Server::start(bool (*should_stop)())
 
     while (running && !should_stop())
     {
-        std::vector<SocketPollRequest> requests{{&listen_socket, false}};
+        std::vector<SocketPollRequest> requests;
+        requests.reserve(clients.size() + 1);
+        requests.push_back({&listen_socket, -1, false});
         for (auto &[client_id, client] : clients)
             if (client.connected)
-                requests.push_back(
-                    {&client.socket, client.output_offset < client.output_buffer.size()});
+                requests.push_back({&client.socket, client_id,
+                                    client.output_offset < client.output_buffer.size()});
 
         const auto events = socket_system.wait_for_events(requests, shutdown_poll_timeout_ms);
         database.remove_expired();
@@ -72,15 +74,7 @@ void Server::start(bool (*should_stop)())
                 continue;
             }
 
-            int client_id = -1;
-            for (const auto &[id, client] : clients)
-            {
-                if (&client.socket == event.socket)
-                {
-                    client_id = id;
-                    break;
-                }
-            }
+            const int client_id = event.client_id;
             if (client_id < 0) continue;
 
             if (event.readable) handle_client(client_id);
@@ -188,11 +182,8 @@ void Server::handle_client(int client_id)
             return;
         }
 
-        const ServerStats stats{clients.size(),
-                                std::chrono::duration_cast<std::chrono::seconds>(
-                                    std::chrono::steady_clock::now() - started_at)
-                                    .count(),
-                                input_buffer_disconnects, output_buffer_disconnects};
+        const ServerStats stats{clients.size(), started_at, input_buffer_disconnects,
+                                output_buffer_disconnects};
         if (!queue_response(client_id, execute_command(*command, database, stats))) return;
         client->second.input_offset += command->bytes_consumed;
         compact_buffer(client->second.buffer, client->second.input_offset);
@@ -236,8 +227,8 @@ bool Server::queue_response(int client_id, const Response &response)
     const auto client = clients.find(client_id);
     if (client == clients.end()) return false;
 
-    const auto encoded = encode_response(response);
-    if (client->second.output_buffer.size() - client->second.output_offset + encoded.size() >
+    const auto response_size = encoded_response_size(response);
+    if (client->second.output_buffer.size() - client->second.output_offset + response_size >
         max_output_buffer_size)
     {
         ++output_buffer_disconnects;
@@ -245,7 +236,7 @@ bool Server::queue_response(int client_id, const Response &response)
         return false;
     }
 
-    client->second.output_buffer += encoded;
+    append_encoded_response(response, client->second.output_buffer);
     return true;
 }
 

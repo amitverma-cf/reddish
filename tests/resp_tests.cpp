@@ -19,7 +19,7 @@ Command command(std::string_view name, std::initializer_list<std::string_view> a
 
 ServerStats stats_for()
 {
-    return {3, 12, 4, 5};
+    return {3, std::chrono::steady_clock::now() - std::chrono::seconds(12), 4, 5};
 }
 
 std::string run(Database &database, Command input)
