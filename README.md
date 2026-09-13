@@ -122,13 +122,13 @@ See [benchmarks/README.md](benchmarks/README.md) for setup and [benchmarks/bench
 <!-- benchmark-summary:start -->
 ### Latest benchmark summary
 
-Generated from the aggregate in [the full benchmark report](benchmarks/benchmarks.md). This is a loopback GET/SET measurement, not a general Redis or Valkey comparison.
+Generated from [the full benchmark report](benchmarks/benchmarks.md). This is a loopback GET/SET measurement, not a general Redis or Valkey comparison.
 
 | Workload | Reddish ops/s | Redis ops/s | Valkey ops/s |
 |---|---:|---:|---:|
-| Read (GET) | 1048k | 1456k | 1495k |
-| Write (SET) | 1169k | 1312k | 1327k |
-| Mixed (50/50) | 1014k | 1404k | 1411k |
+| Read (GET) | 1.0723m | 1.0634m | 1.0726m |
+| Write (SET) | 0.9829m | 0.9810m | 0.9777m |
+| Mixed (50/50) | 1.0176m | 1.0153m | 1.0161m |
 
 <!-- benchmark-summary:end -->
 
