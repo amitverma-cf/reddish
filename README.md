@@ -132,15 +132,6 @@ Generated from [the full benchmark report](benchmarks/benchmarks.md). This is a 
 
 <!-- benchmark-summary:end -->
 
-## API documentation
-
-Doxygen output is committed in [`docs/`](docs/index.html). To regenerate it on Linux:
-
-```bash
-cmake -S . -B build-docs -DREDDISH_BUILD_DOCS=ON
-cmake --build build-docs --target docs
-```
-
 ## Scope
 
 Reddish deliberately does not implement Redis replication, clustering, ACLs, TLS, transactions, Lua scripting, modules, Pub/Sub, streams, or Redis's full command and data-type surface. It also has one server thread, so a slow snapshot or command blocks other clients until it finishes.
