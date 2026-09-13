@@ -10,64 +10,126 @@ THREADS=${THREADS:-1}
 CLIENTS=${CLIENTS:-10}
 PIPELINE=${PIPELINE:-16}
 DURATION_SECONDS=${DURATION_SECONDS:-30}
+AUXILIARY_DURATION_SECONDS=${AUXILIARY_DURATION_SECONDS:-5}
 TRIALS=${TRIALS:-5}
 
-mkdir -p "$RESULT_DIR"
 mkdir -p "$RESULT_DIR/temp"
 printf 'server,workload,trial,ops_per_sec,avg_latency_ms,p50_latency_ms,p99_latency_ms,p999_latency_ms\n' >"$RESULT_DIR/results.csv"
+printf 'server,scenario,key_count,idle_rss_kib,rss_kib,delta_rss_kib,bytes_per_key\n' >"$RESULT_DIR/memory.csv"
 
 for program in memtier_benchmark redis-server valkey-server; do
-  command -v "$program" >/dev/null || {
-    echo "Missing $program. Install it before running a fair comparison." >&2
-    exit 1
-  }
+  command -v "$program" >/dev/null || { echo "Missing $program" >&2; exit 1; }
 done
-test -x "$REDDISH_BINARY" || {
-  echo "Missing reddish Release binary: $REDDISH_BINARY" >&2
-  exit 1
-}
+test -x "$REDDISH_BINARY" || { echo "Missing reddish Release binary: $REDDISH_BINARY" >&2; exit 1; }
 
-pids=()
+server_pid=
 cleanup() {
-  for pid in "${pids[@]:-}"; do kill -INT "$pid" 2>/dev/null || true; done
-  wait "${pids[@]:-}" 2>/dev/null || true
+  if [[ -n "${server_pid:-}" ]]; then
+    kill -INT "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT INT TERM
 
 start_server() {
-  local server=$1 port=$2
+  local server=$1 port=$2 log=$3
   case "$server" in
-    reddish) "$REDDISH_BINARY" "$port" --max-keys "$((KEYS * 2))" --dump-interval 3600 --dump-path "/tmp/reddish-$port.reddish" >"$RESULT_DIR/temp/$server.log" 2>&1 & ;;
-    redis) redis-server --port "$port" --save '' --appendonly no >"$RESULT_DIR/temp/$server.log" 2>&1 & ;;
-    valkey) valkey-server --port "$port" --save '' --appendonly no >"$RESULT_DIR/temp/$server.log" 2>&1 & ;;
+    reddish) "$REDDISH_BINARY" "$port" --max-keys "$((KEYS * 4))" --dump-interval 3600 --dump-path "/tmp/reddish-$port.reddish" >"$log" 2>&1 & ;;
+    redis) redis-server --port "$port" --save '' --appendonly no >"$log" 2>&1 & ;;
+    valkey) valkey-server --port "$port" --save '' --appendonly no >"$log" 2>&1 & ;;
   esac
-  pids+=("$!")
+  server_pid=$!
   sleep 1
+  kill -0 "$server_pid" 2>/dev/null || { cat "$log" >&2; exit 1; }
 }
 
-run_trial() {
-  local server=$1 port=$2 trial=$3 workload=$4 label raw
-  case "$workload" in
-    0:1) label=reads ;;
-    1:0) label=writes ;;
-    1:1) label=mixed ;;
-  esac
-  raw="$RESULT_DIR/temp/$server-$label-$trial.txt"
-  memtier_benchmark --server=127.0.0.1 --port="$port" --protocol=redis --threads="$THREADS" --clients="$CLIENTS" --test-time="$DURATION_SECONDS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-maximum="$KEYS" --ratio="$workload" --hide-histogram >"$raw"
-  awk -v server="$server" -v workload="$label" -v trial="$trial" '/^Totals/ { printf "%s,%s,%s,%s,%s,%s,%s,%s\n", server, workload, trial, $2, $5, $6, $7, $8 }' "$raw" >>"$RESULT_DIR/results.csv"
+stop_server() { cleanup; server_pid=; }
+rss_kib() { awk '/VmRSS:/ {print $2; exit}' "/proc/$server_pid/status"; }
+
+record_memory() {
+  local server=$1 scenario=$2 idle=$3 rss delta bytes
+  rss=$(rss_kib); delta=$((rss - idle)); ((delta < 0)) && delta=0
+  bytes=$(awk -v delta="$delta" -v keys="$KEYS" 'BEGIN {printf "%.2f", delta * 1024 / keys}')
+  printf '%s,%s,%s,%s,%s,%s,%s\n' "$server" "$scenario" "$KEYS" "$idle" "$rss" "$delta" "$bytes" >>"$RESULT_DIR/memory.csv"
 }
 
-for entry in "reddish:6380" "redis:6381" "valkey:6382"; do
+memtier_base() {
+  local port=$1
+  shift
+  memtier_benchmark --server=127.0.0.1 --port="$port" --protocol=redis --threads="$THREADS" --clients="$CLIENTS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-maximum="$KEYS" --hide-histogram "$@"
+}
+
+preload_strings() {
+  memtier_benchmark --server=127.0.0.1 --port="$1" --protocol=redis --threads=1 --clients=1 --requests="$KEYS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-maximum="$KEYS" --key-pattern=S:S --ratio=1:0 --hide-histogram >"$2"
+}
+
+preload_command() {
+  local port=$1 raw=$2; shift 2
+  memtier_benchmark --server=127.0.0.1 --port="$port" --protocol=redis --threads=1 --clients=1 --requests="$KEYS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-maximum="$KEYS" --hide-histogram "$@" >"$raw"
+}
+
+append_result() {
+  local server=$1 workload=$2 trial=$3 raw=$4
+  awk -v server="$server" -v workload="$workload" -v trial="$trial" '/^Totals/ {printf "%s,%s,%s,%s,%s,%s,%s,%s\n",server,workload,trial,$2,$5,$6,$7,$8}' "$raw" >>"$RESULT_DIR/results.csv"
+}
+
+run_ratio() {
+  local server=$1 port=$2 trial=$3 workload=$4 ratio=$5
+  local raw="$RESULT_DIR/temp/$server-$workload-$trial.txt"
+  memtier_base "$port" --test-time "$DURATION_SECONDS" --key-pattern=S:S --ratio="$ratio" >"$raw"
+  append_result "$server" "$workload" "$trial" "$raw"
+}
+
+run_command() {
+  local server=$1 port=$2 trial=$3 workload=$4; shift 4
+  local raw="$RESULT_DIR/temp/$server-$workload-$trial.txt"
+  memtier_base "$port" --test-time "$AUXILIARY_DURATION_SECONDS" "$@" >"$raw"
+  append_result "$server" "$workload" "$trial" "$raw"
+}
+
+run_extended() {
+  local server=$1 port=$2 trial=$3
+  run_command "$server" "$port" "$trial" ping --command='PING'
+  run_command "$server" "$port" "$trial" incr --command='INCR incr:__key__' --command-key-pattern=S
+  run_command "$server" "$port" "$trial" set_del --transaction --command='SET del:__key__ __data__' --command-key-pattern=S --command='DEL del:__key__' --command-key-pattern=S
+  run_command "$server" "$port" "$trial" lpush_lpop --transaction --command='LPUSH left:__key__ __data__' --command-key-pattern=S --command='LPOP left:__key__' --command-key-pattern=S
+  run_command "$server" "$port" "$trial" rpush_rpop --transaction --command='RPUSH right:__key__ __data__' --command-key-pattern=S --command='RPOP right:__key__' --command-key-pattern=S
+  run_command "$server" "$port" "$trial" llen --command='LLEN len:__key__' --command-key-pattern=S
+  run_command "$server" "$port" "$trial" hget --command='HGET hash:__key__ field' --command-key-pattern=S
+  run_command "$server" "$port" "$trial" hlen --command='HLEN hash:__key__' --command-key-pattern=S
+  run_command "$server" "$port" "$trial" hset_hdel --transaction --command='HSET churn:__key__ field __data__' --command-key-pattern=S --command='HDEL churn:__key__ field' --command-key-pattern=S
+  run_command "$server" "$port" "$trial" expire_ttl --transaction --command='SET ttl:__key__ __data__' --command-key-pattern=S --command='EXPIRE ttl:__key__ 60' --command-key-pattern=S --command='TTL ttl:__key__' --command-key-pattern=S
+}
+
+measure_memory() {
+  local server=$1 port=$2 idle
+  start_server "$server" "$port" "$RESULT_DIR/temp/$server-memory-strings.log"; idle=$(rss_kib)
+  preload_strings "$port" "$RESULT_DIR/temp/$server-memory-strings-preload.txt"; record_memory "$server" strings "$idle"; stop_server
+  start_server "$server" "$port" "$RESULT_DIR/temp/$server-memory-lists.log"; idle=$(rss_kib)
+  preload_command "$port" "$RESULT_DIR/temp/$server-memory-lists-preload.txt" --command='LPUSH list:__key__ __data__'; record_memory "$server" lists "$idle"; stop_server
+  start_server "$server" "$port" "$RESULT_DIR/temp/$server-memory-hashes.log"; idle=$(rss_kib)
+  preload_command "$port" "$RESULT_DIR/temp/$server-memory-hashes-preload.txt" --command='HSET hash:__key__ field __data__'; record_memory "$server" hashes "$idle"; stop_server
+}
+
+for entry in 'reddish:6380' 'redis:6381' 'valkey:6382'; do
   server=${entry%%:*}; port=${entry##*:}
-  start_server "$server" "$port"
-  memtier_benchmark --server=127.0.0.1 --port="$port" --protocol=redis --threads=1 --clients=1 --requests="$KEYS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-maximum="$KEYS" --key-pattern=S:S --ratio=1:0 --hide-histogram >"$RESULT_DIR/temp/$server-preload.txt"
-  for workload in 0:1 1:0 1:1; do
-    for trial in $(seq 1 "$TRIALS"); do run_trial "$server" "$port" "$trial" "$workload"; done
+  start_server "$server" "$port" "$RESULT_DIR/temp/$server-performance.log"
+  preload_strings "$port" "$RESULT_DIR/temp/$server-strings-preload.txt"
+  preload_command "$port" "$RESULT_DIR/temp/$server-lists-preload.txt" --command='LPUSH len:__key__ __data__'
+  preload_command "$port" "$RESULT_DIR/temp/$server-hashes-preload.txt" --command='HSET hash:__key__ field __data__'
+  for trial in $(seq 1 "$TRIALS"); do
+    run_ratio "$server" "$port" "$trial" reads 0:1
+    run_ratio "$server" "$port" "$trial" writes 1:0
+    run_ratio "$server" "$port" "$trial" mixed 1:1
+    run_extended "$server" "$port" "$trial"
   done
+  stop_server
+  measure_memory "$server" "$port"
 done
 
 {
-  echo "server,workload,samples,average_ops_per_sec,average_p99_latency_ms"
-  awk -F, 'NR == 1 { next } { key = $1 FS $2; ops[key] += $4; p99[key] += $7; count[key]++ } END { for (key in count) { split(key, fields, FS); printf "%s,%s,%d,%.2f,%.5f\n", fields[1], fields[2], count[key], ops[key] / count[key], p99[key] / count[key] } }' "$RESULT_DIR/results.csv" | sort
+  echo 'server,workload,samples,average_ops_per_sec,average_p99_latency_ms'
+  awk -F, 'NR > 1 {k=$1 FS $2; ops[k]+=$4; p99[k]+=$7; count[k]++} END {for(k in count) {split(k,a,FS); printf "%s,%s,%d,%.2f,%.5f\n",a[1],a[2],count[k],ops[k]/count[k],p99[k]/count[k]}}' "$RESULT_DIR/results.csv" | sort
 } >"$RESULT_DIR/summary.csv"
 echo "Results: $RESULT_DIR/summary.csv"
+echo "Memory: $RESULT_DIR/memory.csv"

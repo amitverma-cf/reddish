@@ -1,8 +1,8 @@
 # Redis, Valkey, and reddish benchmarks
 
-The default workloads are `reads` (100% GET), `writes` (100% SET), and `mixed` (50% GET, 50% SET).
+The headline workloads are `reads` (100% GET), `writes` (100% SET), and `mixed` (50% GET, 50% SET). The full suite additionally exercises every implemented command family and compares RSS after equivalent string, list, and hash preloads.
 
-This is a narrow loopback benchmark using 32-byte values, one memtier worker, ten clients, pipeline depth 16, and no timed persistence.
+This is a narrow loopback benchmark using 32-byte values, one memtier worker, ten clients, pipeline depth 16, and no timed persistence. RSS includes process and allocator overhead; it is useful for comparison, not an exact per-value allocation measurement.
 
 <!-- generated-results:start -->
 ## Published results

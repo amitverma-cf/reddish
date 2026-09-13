@@ -21,9 +21,8 @@ build
 build*
 output
 out
-/benchmarks/results/*/*
-!/benchmarks/results/*/results.csv
-!/benchmarks/results/*/summary.csv
+/benchmarks/results/*
+!/benchmarks/results/.gitkeep
 # Compiled object files
 *.o
 *.obj
