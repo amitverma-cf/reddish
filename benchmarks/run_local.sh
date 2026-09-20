@@ -17,7 +17,7 @@ mkdir -p "$RESULT_DIR/temp"
 printf 'server,workload,trial,ops_per_sec,avg_latency_ms,p50_latency_ms,p99_latency_ms,p999_latency_ms\n' >"$RESULT_DIR/results.csv"
 printf 'server,scenario,key_count,idle_rss_kib,rss_kib,delta_rss_kib,bytes_per_key\n' >"$RESULT_DIR/memory.csv"
 
-for program in memtier_benchmark redis-server valkey-server; do
+for program in memtier_benchmark redis-server valkey-server memcached; do
   command -v "$program" >/dev/null || { echo "Missing $program" >&2; exit 1; }
 done
 test -x "$REDDISH_BINARY" || { echo "Missing reddish Release binary: $REDDISH_BINARY" >&2; exit 1; }
@@ -37,6 +37,7 @@ start_server() {
     reddish) "$REDDISH_BINARY" "$port" --max-keys "$((KEYS * 4))" --dump-interval 3600 --dump-path "/tmp/reddish-$port.reddish" >"$log" 2>&1 & ;;
     redis) redis-server --port "$port" --save '' --appendonly no >"$log" 2>&1 & ;;
     valkey) valkey-server --port "$port" --save '' --appendonly no >"$log" 2>&1 & ;;
+    memcached) memcached -l 127.0.0.1 -p "$port" -U 0 >"$log" 2>&1 & ;;
   esac
   server_pid=$!
   sleep 1
@@ -53,14 +54,19 @@ record_memory() {
   printf '%s,%s,%s,%s,%s,%s,%s\n' "$server" "$scenario" "$KEYS" "$idle" "$rss" "$delta" "$bytes" >>"$RESULT_DIR/memory.csv"
 }
 
+protocol_for() {
+  [[ $1 == memcached ]] && printf '%s' memcache_binary || printf '%s' redis
+}
+
 memtier_base() {
-  local port=$1
-  shift
-  memtier_benchmark --server=127.0.0.1 --port="$port" --protocol=redis --threads="$THREADS" --clients="$CLIENTS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-maximum="$KEYS" --hide-histogram "$@"
+  local server=$1 port=$2
+  shift 2
+  memtier_benchmark --server=127.0.0.1 --port="$port" --protocol="$(protocol_for "$server")" --threads="$THREADS" --clients="$CLIENTS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-maximum="$KEYS" --hide-histogram "$@"
 }
 
 preload_strings() {
-  memtier_benchmark --server=127.0.0.1 --port="$1" --protocol=redis --threads=1 --clients=1 --requests="$KEYS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-maximum="$KEYS" --key-pattern=S:S --ratio=1:0 --hide-histogram >"$2"
+  local server=$1 port=$2 output=$3
+  memtier_benchmark --server=127.0.0.1 --port="$port" --protocol="$(protocol_for "$server")" --threads=1 --clients=1 --requests="$KEYS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-maximum="$KEYS" --key-pattern=S:S --ratio=1:0 --hide-histogram >"$output"
 }
 
 preload_command() {
@@ -76,14 +82,14 @@ append_result() {
 run_ratio() {
   local server=$1 port=$2 trial=$3 workload=$4 ratio=$5
   local raw="$RESULT_DIR/temp/$server-$workload-$trial.txt"
-  memtier_base "$port" --test-time "$DURATION_SECONDS" --key-pattern=S:S --ratio="$ratio" >"$raw"
+  memtier_base "$server" "$port" --test-time "$DURATION_SECONDS" --key-pattern=S:S --ratio="$ratio" >"$raw"
   append_result "$server" "$workload" "$trial" "$raw"
 }
 
 run_command() {
   local server=$1 port=$2 trial=$3 workload=$4; shift 4
   local raw="$RESULT_DIR/temp/$server-$workload-$trial.txt"
-  memtier_base "$port" --test-time "$AUXILIARY_DURATION_SECONDS" "$@" >"$raw"
+  memtier_base "$server" "$port" --test-time "$AUXILIARY_DURATION_SECONDS" "$@" >"$raw"
   append_result "$server" "$workload" "$trial" "$raw"
 }
 
@@ -104,24 +110,29 @@ run_extended() {
 measure_memory() {
   local server=$1 port=$2 idle
   start_server "$server" "$port" "$RESULT_DIR/temp/$server-memory-strings.log"; idle=$(rss_kib)
-  preload_strings "$port" "$RESULT_DIR/temp/$server-memory-strings-preload.txt"; record_memory "$server" strings "$idle"; stop_server
+  preload_strings "$server" "$port" "$RESULT_DIR/temp/$server-memory-strings-preload.txt"; record_memory "$server" strings "$idle"; stop_server
+  [[ $server == memcached ]] && return
   start_server "$server" "$port" "$RESULT_DIR/temp/$server-memory-lists.log"; idle=$(rss_kib)
   preload_command "$port" "$RESULT_DIR/temp/$server-memory-lists-preload.txt" --command='LPUSH list:__key__ __data__'; record_memory "$server" lists "$idle"; stop_server
   start_server "$server" "$port" "$RESULT_DIR/temp/$server-memory-hashes.log"; idle=$(rss_kib)
   preload_command "$port" "$RESULT_DIR/temp/$server-memory-hashes-preload.txt" --command='HSET hash:__key__ field __data__'; record_memory "$server" hashes "$idle"; stop_server
 }
 
-for entry in 'reddish:6380' 'redis:6381' 'valkey:6382'; do
+for entry in 'reddish:6380' 'redis:6381' 'valkey:6382' 'memcached:6383'; do
   server=${entry%%:*}; port=${entry##*:}
   start_server "$server" "$port" "$RESULT_DIR/temp/$server-performance.log"
-  preload_strings "$port" "$RESULT_DIR/temp/$server-strings-preload.txt"
-  preload_command "$port" "$RESULT_DIR/temp/$server-lists-preload.txt" --command='LPUSH len:__key__ __data__'
-  preload_command "$port" "$RESULT_DIR/temp/$server-hashes-preload.txt" --command='HSET hash:__key__ field __data__'
+  preload_strings "$server" "$port" "$RESULT_DIR/temp/$server-strings-preload.txt"
+  if [[ $server != memcached ]]; then
+    preload_command "$port" "$RESULT_DIR/temp/$server-lists-preload.txt" --command='LPUSH len:__key__ __data__'
+    preload_command "$port" "$RESULT_DIR/temp/$server-hashes-preload.txt" --command='HSET hash:__key__ field __data__'
+  fi
   for trial in $(seq 1 "$TRIALS"); do
     run_ratio "$server" "$port" "$trial" reads 0:1
     run_ratio "$server" "$port" "$trial" writes 1:0
-    run_ratio "$server" "$port" "$trial" mixed 1:1
-    run_extended "$server" "$port" "$trial"
+    if [[ $server != memcached ]]; then
+      run_ratio "$server" "$port" "$trial" mixed 1:1
+      run_extended "$server" "$port" "$trial"
+    fi
   done
   stop_server
   measure_memory "$server" "$port"

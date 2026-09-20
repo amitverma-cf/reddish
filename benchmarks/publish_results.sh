@@ -53,9 +53,11 @@ awk -v generated="$generated" '/<!-- generated-results:start -->/ {while((getlin
 
 {
   echo '<!-- benchmark-summary:start -->'; echo '### Latest benchmark summary'; echo
-  echo 'Generated from [the full benchmark report](benchmarks/benchmarks.md). This is a loopback GET/SET measurement, not a general Redis or Valkey comparison.'; echo
+  echo 'Generated from [the full benchmark report](benchmarks/benchmarks.md). This is a loopback measurement, not a general server comparison. Memcached is a string-cache baseline and is measured only for GET and SET.'; echo
   echo '| Workload | Reddish ops/s | Redis ops/s | Valkey ops/s |'; echo '|---|---:|---:|---:|'
   printf '%s\n' "$summary" | awk -F, '{v[$2 SUBSEP $1]=$4} function f(x){return sprintf("%.4fm",x/1000000)} END {print "| Read (GET) | " f(v["reads" SUBSEP "reddish"]) " | " f(v["reads" SUBSEP "redis"]) " | " f(v["reads" SUBSEP "valkey"]) " |"; print "| Write (SET) | " f(v["writes" SUBSEP "reddish"]) " | " f(v["writes" SUBSEP "redis"]) " | " f(v["writes" SUBSEP "valkey"]) " |"; print "| Mixed (50/50) | " f(v["mixed" SUBSEP "reddish"]) " | " f(v["mixed" SUBSEP "redis"]) " | " f(v["mixed" SUBSEP "valkey"]) " |"}'
+  echo; echo '| Simple-cache baseline | Memcached ops/s |'; echo '|---|---:|'
+  printf '%s\n' "$summary" | awk -F, '{v[$2 SUBSEP $1]=$4} function f(x){return sprintf("%.4fm",x/1000000)} END {print "| Read (GET) | " f(v["reads" SUBSEP "memcached"]) " |"; print "| Write (SET) | " f(v["writes" SUBSEP "memcached"]) " |"}'
   echo; echo '<!-- benchmark-summary:end -->'
 } >"$root_summary"
 awk -v generated="$root_summary" '/<!-- benchmark-summary:start -->/ {while((getline line < generated)>0) print line;close(generated);skip=1;next} /<!-- benchmark-summary:end -->/ {skip=0;next} !skip {print}' "$README_FILE" >"$README_FILE.tmp"; mv "$README_FILE.tmp" "$README_FILE"

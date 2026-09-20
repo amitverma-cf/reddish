@@ -111,7 +111,7 @@ Include `client.hpp`, link `reddish_client`, create `reddish::client::Client`, t
 
 ## Benchmarks
 
-The benchmark runner compares Reddish, Redis, and Valkey with `memtier_benchmark` on Linux or WSL. It is a loopback measurement of the supported `GET` and `SET` workloads, not a general comparison of the three servers.
+The benchmark runner compares Reddish, Redis, and Valkey with `memtier_benchmark` on Linux. Memcached is included as a string-cache baseline for `GET`, `SET`, and string-memory measurement only.
 
 ```bash
 bash benchmarks/run_local.sh

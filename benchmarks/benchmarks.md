@@ -1,6 +1,6 @@
-# Redis, Valkey, and reddish benchmarks
+# Reddish, Redis, Valkey, and Memcached benchmarks
 
-The headline workloads are `reads` (100% GET), `writes` (100% SET), and `mixed` (50% GET, 50% SET). The full suite additionally exercises every implemented command family and compares RSS after equivalent string, list, and hash preloads.
+The headline workloads are `reads` (100% GET), `writes` (100% SET), and `mixed` (50% GET, 50% SET). The full suite additionally exercises every implemented command family and compares RSS after equivalent string, list, and hash preloads. Memcached is a simple string-cache baseline: it participates only in GET, SET, and string RSS measurements.
 
 This is a narrow loopback benchmark using 32-byte values, one memtier worker, ten clients, pipeline depth 16, and no timed persistence. RSS includes process and allocator overhead; it is useful for comparison, not an exact per-value allocation measurement.
 
