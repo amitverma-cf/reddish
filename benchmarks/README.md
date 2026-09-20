@@ -1,8 +1,10 @@
 # Linux benchmarks
 
-Run on Linux after installing `memtier_benchmark`, Redis, and Valkey. Native Windows is unsupported.
+Run on Linux after installing `memtier_benchmark`, Redis, Valkey, and Memcached. Native Windows is unsupported.
 
-The runner uses the same keyspace, value size, client count, pipeline depth, warm-up preload, duration, and five trials for reddish, Redis, and Valkey. It disables Redis/Valkey persistence so the comparison measures command-path performance; reddish uses a one-hour dump interval so no snapshot happens during a run. The headline workloads are GET, SET, and a 50/50 mix; the full report also exercises every implemented command family and measures RSS after string, list, and hash preloads.
+The runner uses the same keyspace, value size, client count, pipeline depth, warm-up preload, duration, and five trials for Reddish, Redis, and Valkey. It disables Redis/Valkey persistence so the comparison measures command-path performance; Reddish uses a one-hour dump interval so no snapshot happens during a run. The headline workloads are GET, SET, and a 50/50 mix; the full report also exercises every implemented command family and measures RSS after string, list, and hash preloads.
+
+Memcached is included only as a string-cache baseline. It runs GET and SET plus string RSS measurement, and is deliberately excluded from mixed, list, hash, expiry, and other Redis-protocol command comparisons.
 
 Each run writes `results.csv`, `memory.csv`, and `summary.csv` beside a `temp/` directory containing raw logs and memtier output. The whole run directory stays untracked. RSS includes process and allocator overhead, so it is a comparative estimate rather than exact per-value memory use.
 

@@ -24,7 +24,7 @@ jobs:
         run: |
           sudo add-apt-repository --yes universe
           sudo apt-get update
-          sudo apt-get install --yes curl gpg lsb-release software-properties-common redis-server valkey-server
+          sudo apt-get install --yes curl gpg lsb-release software-properties-common redis-server valkey-server memcached
           curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" \
             | sudo tee /etc/apt/sources.list.d/redis.list
