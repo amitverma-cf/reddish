@@ -122,13 +122,18 @@ See [benchmarks/README.md](benchmarks/README.md) for setup and [benchmarks/bench
 <!-- benchmark-summary:start -->
 ### Latest benchmark summary
 
-Generated from [the full benchmark report](benchmarks/benchmarks.md). This is a loopback GET/SET measurement, not a general Redis or Valkey comparison.
+Generated from [the full benchmark report](benchmarks/benchmarks.md). This is a loopback measurement, not a general server comparison. Memcached is a string-cache baseline and is measured only for GET and SET.
 
 | Workload | Reddish ops/s | Redis ops/s | Valkey ops/s |
 |---|---:|---:|---:|
-| Read (GET) | 1.0723m | 1.0634m | 1.0726m |
-| Write (SET) | 0.9829m | 0.9810m | 0.9777m |
-| Mixed (50/50) | 1.0176m | 1.0153m | 1.0161m |
+| Read (GET) | 1.1362m | 1.1411m | 1.1210m |
+| Write (SET) | 0.9957m | 1.0092m | 1.0010m |
+| Mixed (50/50) | 1.0452m | 1.0631m | 1.0612m |
+
+| Simple-cache baseline | Memcached ops/s |
+|---|---:|
+| Read (GET) | 0.8425m |
+| Write (SET) | 0.7883m |
 
 <!-- benchmark-summary:end -->
 
