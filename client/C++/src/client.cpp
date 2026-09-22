@@ -1,4 +1,5 @@
 #include "client.hpp"
+#include <charconv>
 
 namespace reddish::client
 {
@@ -23,12 +24,85 @@ std::expected<std::string, std::string> Client::execute(
         request += "$" + std::to_string(part.size()) + "\r\n" + std::string(part) + "\r\n";
 
     const auto sent = socket_.send(request.data(), request.size());
-    if (!sent) return std::unexpected(sent.error());
+    if (!sent)
+    {
+        close();
+        return std::unexpected(sent.error());
+    }
 
-    char buffer[4096];
-    const auto count = socket_.receive(buffer, sizeof(buffer));
-    if (!count) return std::unexpected(count.error());
-    return std::string(buffer, *count);
+    std::string response;
+    std::size_t position = 0;
+    std::size_t pending = 1;
+    constexpr std::size_t limit = 16 * 1024 * 1024;
+    while (pending != 0)
+    {
+        const auto end = response.find("\r\n", position);
+        bool incomplete = end == std::string::npos;
+        if (!incomplete)
+        {
+            const char type = response[position];
+            std::int64_t length = 0;
+            if (type == '$' || type == '*')
+            {
+                const auto first = response.data() + position + 1;
+                const auto last = response.data() + end;
+                const auto [ptr, ec] = std::from_chars(first, last, length);
+                if (ec != std::errc{} || ptr != last || length < -1 ||
+                    length > static_cast<std::int64_t>(limit))
+                {
+                    close();
+                    return std::unexpected("Invalid RESP length");
+                }
+            }
+            else if (type != '+' && type != '-' && type != ':')
+            {
+                close();
+                return std::unexpected("Invalid RESP reply type");
+            }
+            std::size_t next = end + 2;
+            if (type == '$' && length >= 0)
+            {
+                next += static_cast<std::size_t>(length) + 2;
+                incomplete = response.size() < next;
+                if (!incomplete && response.compare(next - 2, 2, "\r\n") != 0)
+                {
+                    close();
+                    return std::unexpected("Invalid RESP bulk terminator");
+                }
+            }
+            if (!incomplete)
+            {
+                position = next;
+                --pending;
+                if (type == '*' && length > 0) pending += static_cast<std::size_t>(length);
+                if (pending > limit)
+                {
+                    close();
+                    return std::unexpected("RESP reply too large");
+                }
+                continue;
+            }
+        }
+        char buffer[4096];
+        const auto count = socket_.receive(buffer, sizeof(buffer));
+        if (!count)
+        {
+            close();
+            return std::unexpected(count.error());
+        }
+        if (response.size() + static_cast<std::size_t>(*count) > limit)
+        {
+            close();
+            return std::unexpected("RESP reply too large");
+        }
+        response.append(buffer, static_cast<std::size_t>(*count));
+    }
+    if (position != response.size())
+    {
+        close();
+        return std::unexpected("Unexpected data after RESP reply");
+    }
+    return response;
 }
 
 std::expected<std::string, std::string> Client::ping()

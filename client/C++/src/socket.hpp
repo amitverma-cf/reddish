@@ -17,6 +17,9 @@ class SocketSystem
 class Socket
 {
   public:
+    Socket() = default;
+    Socket(const Socket &) = delete;
+    Socket &operator=(const Socket &) = delete;
     ~Socket();
     std::expected<void, std::string> connect(const std::string &host, std::uint16_t port);
     std::expected<int, std::string> send(const char *data, std::size_t size);

@@ -1,4 +1,6 @@
 #include "socket.hpp"
+#include <cerrno>
+#include <limits>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -30,6 +32,7 @@ Socket::~Socket()
 }
 std::expected<void, std::string> Socket::connect(const std::string &host, std::uint16_t port)
 {
+    close();
     const auto socket = ::socket(AF_INET, SOCK_STREAM, 0);
 #ifdef _WIN32
     if (socket == INVALID_SOCKET) return std::unexpected("Failed to create socket");
@@ -54,17 +57,51 @@ std::expected<void, std::string> Socket::connect(const std::string &host, std::u
 }
 std::expected<int, std::string> Socket::send(const char *data, std::size_t size)
 {
-    const auto count =
-        ::send(static_cast<decltype(::socket(0, 0, 0))>(handle_), data, static_cast<int>(size), 0);
-    if (count < 0) return std::unexpected("Failed to send command");
-    return count;
+    if (size > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+        return std::unexpected("Command too large");
+    std::size_t offset = 0;
+    while (offset < size)
+    {
+#ifdef _WIN32
+        constexpr int flags = 0;
+#else
+        constexpr int flags = MSG_NOSIGNAL;
+#endif
+        const auto count = ::send(static_cast<decltype(::socket(0, 0, 0))>(handle_), data + offset,
+                                  static_cast<int>(size - offset), flags);
+        if (count < 0)
+        {
+#ifdef _WIN32
+            if (WSAGetLastError() == WSAEINTR) continue;
+#else
+            if (errno == EINTR) continue;
+#endif
+            return std::unexpected("Failed to send command");
+        }
+        if (count == 0) return std::unexpected("Server closed connection");
+        offset += static_cast<std::size_t>(count);
+    }
+    return static_cast<int>(offset);
 }
 std::expected<int, std::string> Socket::receive(char *data, std::size_t size)
 {
-    const auto count =
-        ::recv(static_cast<decltype(::socket(0, 0, 0))>(handle_), data, static_cast<int>(size), 0);
-    if (count <= 0) return std::unexpected("Server closed connection");
-    return count;
+    if (size > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+        return std::unexpected("Receive buffer too large");
+    for (;;)
+    {
+        const auto count = ::recv(static_cast<decltype(::socket(0, 0, 0))>(handle_), data,
+                                  static_cast<int>(size), 0);
+        if (count < 0)
+        {
+#ifdef _WIN32
+            if (WSAGetLastError() == WSAEINTR) continue;
+#else
+            if (errno == EINTR) continue;
+#endif
+        }
+        if (count <= 0) return std::unexpected("Server closed connection");
+        return count;
+    }
 }
 void Socket::close()
 {
