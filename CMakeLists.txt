@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(REDDISH_ENABLE_COVERAGE "Enable LLVM source coverage instrumentation" OFF)
+option(REDDISH_BUILD_PROFILES "Build database profiling workloads" OFF)
 
 if(MSVC)
     add_compile_options(/FS)
@@ -30,6 +31,9 @@ add_library(reddish_core
     src/error.cpp
     src/database.cpp
     src/resp.cpp
+    src/pack.cpp
+    src/slab.cpp
+    src/wal.cpp
 )
 
 target_include_directories(reddish_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -41,6 +45,11 @@ endif()
 
 add_executable(reddish src/main.cpp)
 target_link_libraries(reddish PRIVATE reddish_core)
+
+if(REDDISH_BUILD_PROFILES)
+    add_executable(reddish_profile benchmarks/profile.cpp)
+    target_link_libraries(reddish_profile PRIVATE reddish_core)
+endif()
 
 if(REDDISH_ENABLE_COVERAGE)
     if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -63,14 +72,12 @@ if(BUILD_TESTING)
         GIT_REPOSITORY https://github.com/catchorg/Catch2.git
         GIT_TAG v3.8.1
         GIT_SHALLOW TRUE
+        SOURCE_SUBDIR extras
     )
-    FetchContent_GetProperties(Catch2)
-    if(NOT catch2_POPULATED)
-        FetchContent_Populate(Catch2)
-    endif()
+    FetchContent_MakeAvailable(Catch2)
+    add_subdirectory(client/C++)
     add_subdirectory(tests)
     if(REDDISH_ENABLE_COVERAGE)
         target_link_options(reddish_tests PRIVATE -fprofile-instr-generate)
     endif()
 endif()
-

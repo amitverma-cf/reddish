@@ -38,7 +38,7 @@ class ServerProcess
     {
 #ifdef _WIN32
         const std::wstring command = L"\"" + std::filesystem::path(REDDISH_EXECUTABLE).wstring() +
-                                     L"\" " + std::to_wstring(port) + L" --load-dump \"" +
+                                     L"\" " + std::to_wstring(port) + L" --wal-path \"" +
                                      dump_path.wstring() + L"\"";
         std::wstring mutable_command = command;
         STARTUPINFOW startup{};
@@ -52,7 +52,7 @@ class ServerProcess
         if (process_ == 0)
         {
             const auto port_text = std::to_string(port);
-            execl(REDDISH_EXECUTABLE, REDDISH_EXECUTABLE, port_text.c_str(), "--load-dump",
+            execl(REDDISH_EXECUTABLE, REDDISH_EXECUTABLE, port_text.c_str(), "--wal-path",
                   dump_path.c_str(), nullptr);
             _exit(127);
         }
@@ -129,20 +129,25 @@ std::string get_loaded_value(std::uint16_t port)
 
 } // namespace
 
-TEST_CASE("main loads a requested dump before accepting TCP commands")
+TEST_CASE("main replays WAL before accepting TCP commands")
 {
     SocketSystem socket_system;
     const auto dump_path = std::filesystem::temp_directory_path() / "reddish-main-test.reddish";
     std::error_code error;
     std::filesystem::remove(dump_path, error);
 
-    Database database;
-    database.set("name", "loaded");
-    REQUIRE(database.dump_to_disk(dump_path));
+    {
+        Database database;
+        database.open_wal(dump_path, WalSync::always);
+        database.set("name", "loaded");
+        database.flush_wal();
+    }
 
     const auto port = next_port++;
-    ServerProcess process(port, dump_path);
-    CHECK(get_loaded_value(port) == "$6\r\nloaded\r\n");
+    {
+        ServerProcess process(port, dump_path);
+        CHECK(get_loaded_value(port) == "$6\r\nloaded\r\n");
+    }
 
     std::filesystem::remove(dump_path, error);
 }

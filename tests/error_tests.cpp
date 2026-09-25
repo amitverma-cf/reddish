@@ -29,7 +29,6 @@ TEST_CASE("every error code has a message")
         ErrorCode::request_too_large,
         ErrorCode::disk_write_failed,
         ErrorCode::disk_read_failed,
-        ErrorCode::dump_exceeds_key_capacity,
         ErrorCode::socket_startup_failed,
         ErrorCode::socket_poll_failed,
         ErrorCode::socket_creation_failed,

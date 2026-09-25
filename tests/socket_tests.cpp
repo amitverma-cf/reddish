@@ -42,7 +42,7 @@ void close_native_socket(
 
 } // namespace
 
-TEST_CASE("socket accepts polls reads writes moves and closes")
+TEST_CASE("socket accepts reads writes moves and closes")
 {
     SocketSystem socket_system;
     Socket listener;
@@ -114,26 +114,105 @@ TEST_CASE("socket accepts polls reads writes moves and closes")
     REQUIRE(accepted.valid());
     accepted.set_nonblocking();
 
+    constexpr int accepted_token = 7;
+    socket_system.watch(accepted, accepted_token, true, false);
+
     char buffer[4];
     int received = accepted.receive(buffer, sizeof(buffer));
     if (received < 0)
     {
         CHECK(accepted.would_block());
-        const auto events = socket_system.wait_for_events({{&accepted, false}}, 1000);
+        const auto events = socket_system.wait(1000);
         REQUIRE(events.size() == 1);
+        CHECK(events[0].token == accepted_token);
         CHECK(events[0].readable);
         received = accepted.receive(buffer, sizeof(buffer));
     }
     REQUIRE(received == 4);
     CHECK(std::string(buffer, sizeof(buffer)) == "ping");
+
+    // Enabling writability interest must produce a writable event for a socket
+    // that has room in its send buffer.
+    socket_system.watch(accepted, accepted_token, true, true);
+    bool saw_writable = false;
+    for (int attempt = 0; attempt < 20 && !saw_writable; ++attempt)
+    {
+        for (const auto &event : socket_system.wait(1000))
+            if (event.token == accepted_token && event.writable) saw_writable = true;
+    }
+    CHECK(saw_writable);
+
     REQUIRE(accepted.send("pong", 4) == 4);
 
     client.join();
     CHECK(client_succeeded);
     CHECK(client_reply == "pong");
+
+    // Removing the registration must stop events for it.
+    socket_system.unwatch(accepted);
+    for (const auto &event : socket_system.wait(0))
+        CHECK(event.token != accepted_token);
+
     Socket moved = std::move(accepted);
     CHECK(moved.valid());
     CHECK_FALSE(accepted.valid());
     moved.close();
     CHECK_FALSE(moved.valid());
+}
+
+TEST_CASE("socket events report the listening token")
+{
+    SocketSystem socket_system;
+    Socket listener;
+    std::uint16_t port = 28000;
+    for (;; ++port)
+    {
+        try
+        {
+            listener.create_tcp();
+            listener.bind(port);
+            break;
+        }
+        catch (const Error &)
+        {
+            listener.close();
+            REQUIRE(port < 29000);
+        }
+    }
+    listener.listen(1);
+    listener.set_nonblocking();
+    socket_system.watch(listener, SocketSystem::listener_token, true, false);
+
+    std::atomic_bool connected = false;
+    std::thread client(
+        [&]
+        {
+#ifdef _WIN32
+            const SOCKET handle = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (handle == INVALID_SOCKET) return;
+#else
+            const int handle = ::socket(AF_INET, SOCK_STREAM, 0);
+            if (handle < 0) return;
+#endif
+            sockaddr_in address{};
+            address.sin_family = AF_INET;
+            address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            address.sin_port = htons(port);
+            connected = ::connect(handle, reinterpret_cast<const sockaddr *>(&address),
+                                  sizeof(address)) == 0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            close_native_socket(handle);
+        });
+
+    bool saw_listener = false;
+    for (int attempt = 0; attempt < 100 && !saw_listener; ++attempt)
+        for (const auto &event : socket_system.wait(50))
+            if (event.token == SocketSystem::listener_token && event.readable) saw_listener = true;
+
+    CHECK(saw_listener);
+    Socket accepted = listener.accept();
+    CHECK(accepted.valid());
+    accepted.close();
+    client.join();
+    CHECK(connected);
 }

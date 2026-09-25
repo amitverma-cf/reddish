@@ -14,7 +14,11 @@ namespace
 
 Command command(std::string_view name, std::initializer_list<std::string_view> arguments = {})
 {
-    return {name, {arguments}, 0};
+    Command parsed;
+    parsed.name = name;
+    for (const auto value : arguments)
+        parsed.arguments.push_back(value);
+    return parsed;
 }
 
 ServerStats stats_for()
@@ -24,7 +28,9 @@ ServerStats stats_for()
 
 std::string run(Database &database, Command input)
 {
-    return encode_response(execute_command(input, database, stats_for()));
+    std::string output;
+    execute_into(input, database, stats_for(), output);
+    return output;
 }
 
 void check_parse_error(std::string_view input, ErrorCode code)
@@ -49,6 +55,28 @@ TEST_CASE("RESP parser reads a command and leaves pipelined bytes")
     CHECK(input.substr(parsed->bytes_consumed) == "*1\r\n$4\r\nPING\r\n");
 }
 
+TEST_CASE("RESP parser reuses an existing command slot without reallocating")
+{
+    Command command;
+    REQUIRE(parse_command_into("*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\nb\r\n", command));
+    CHECK(command.arguments.size() == 2);
+
+    // Reusing the slot must drop the previous arguments rather than append.
+    REQUIRE(parse_command_into("*1\r\n$4\r\nPING\r\n", command));
+    CHECK(command.name == "PING");
+    CHECK(command.arguments.empty());
+
+    // More arguments than the inline capacity must still work.
+    std::string wide = "*10\r\n$5\r\nLPUSH\r\n$1\r\nk\r\n";
+    for (int index = 0; index < 8; ++index)
+        wide += "$1\r\n" + std::to_string(index) + "\r\n";
+    REQUIRE(parse_command_into(wide, command));
+    CHECK(command.name == "LPUSH");
+    REQUIRE(command.arguments.size() == 9);
+    CHECK(command.arguments[0] == "k");
+    CHECK(command.arguments[8] == "7");
+}
+
 TEST_CASE("RESP parser rejects malformed input")
 {
     check_parse_error("", ErrorCode::empty_resp_input);
@@ -66,13 +94,49 @@ TEST_CASE("RESP parser rejects malformed input")
 
 TEST_CASE("RESP encoder emits every response type")
 {
-    CHECK(encode_response(Response{SimpleString{"OK"}}) == "+OK\r\n");
-    CHECK(encode_response(Response{ErrorResponse{"ERR failed"}}) == "-ERR failed\r\n");
-    CHECK(encode_response(Response{Integer{-12}}) == ":-12\r\n");
-    CHECK(encode_response(Response{BulkString{"hello"}}) == "$5\r\nhello\r\n");
-    CHECK(encode_response(Response{Null{}}) == "$-1\r\n");
-    CHECK(encode_response(Response{ResponseArray{
-              {Response{Integer{1}}, Response{BulkString{"x"}}}}}) == "*2\r\n:1\r\n$1\r\nx\r\n");
+    std::string output;
+
+    append_simple_string(output, "OK");
+    CHECK(output == "+OK\r\n");
+
+    output.clear();
+    append_error(output, "ERR failed");
+    CHECK(output == "-ERR failed\r\n");
+
+    output.clear();
+    append_integer(output, -12);
+    CHECK(output == ":-12\r\n");
+
+    output.clear();
+    append_bulk_string(output, "hello");
+    CHECK(output == "$5\r\nhello\r\n");
+
+    output.clear();
+    append_null(output);
+    CHECK(output == "$-1\r\n");
+
+    output.clear();
+    append_array_header(output, 2);
+    append_integer(output, 1);
+    append_bulk_string(output, "x");
+    CHECK(output == "*2\r\n:1\r\n$1\r\nx\r\n");
+}
+
+TEST_CASE("command dispatch ignores name casing and rejects unknown commands")
+{
+    CHECK(classify_command("GET").id == CommandId::get);
+    CHECK(classify_command("get").id == CommandId::get);
+    CHECK(classify_command("SeT").id == CommandId::set);
+    CHECK(classify_command("PING").is_write == false);
+    CHECK(classify_command("SET").is_write == true);
+    CHECK(classify_command("DEL").is_write == true);
+    CHECK(classify_command("GET").is_write == false);
+    CHECK(classify_command("WHATEVER").id == CommandId::unknown);
+    // A name with an embedded NUL must not alias the shorter command.
+    CHECK(classify_command(std::string_view{"get\0\0\0\0\0", 8}).id == CommandId::unknown);
+
+    Database database;
+    CHECK(run(database, command("get", {"missing"})) == "$-1\r\n");
 }
 
 TEST_CASE("command execution handles strings integers and deletion")
@@ -105,6 +169,11 @@ TEST_CASE("command execution handles lists and hashes")
     CHECK(run(database, command("HDEL", {"user", "name"})) == ":1\r\n");
     CHECK(run(database, command("HSET", {"user", "name"})) ==
           "-ERR wrong number of arguments for 'hset' command\r\n");
+
+    // A hash field stored as an integer still answers with a bulk string, exactly
+    // like Redis does, rather than leaking the internal integer encoding.
+    CHECK(run(database, command("HSET", {"counters", "hits", "7"})) == ":1\r\n");
+    CHECK(run(database, command("HGET", {"counters", "hits"})) == "$1\r\n7\r\n");
 }
 
 TEST_CASE("command execution handles expiry and INFO")
@@ -115,6 +184,8 @@ TEST_CASE("command execution handles expiry and INFO")
     CHECK(run(database, command("EXPIRE", {"key", "10"})) == ":1\r\n");
     CHECK(run(database, command("TTL", {"key"})).starts_with(":"));
     CHECK(run(database, command("EXPIRE", {"key", "invalid"})) ==
+          "-ERR value is not an integer or out of range\r\n");
+    CHECK(run(database, command("EXPIRE", {"key", "9223372036854775807"})) ==
           "-ERR value is not an integer or out of range\r\n");
     CHECK(run(database, command("INFO", {"memory"})).find("# Memory\r\n") != std::string::npos);
     CHECK(run(database, command("INFO")).find("connected_clients:3\r\n") != std::string::npos);

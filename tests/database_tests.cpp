@@ -10,26 +10,6 @@
 
 using namespace reddish;
 
-namespace
-{
-
-std::filesystem::path temporary_dump_path(std::string_view name)
-{
-    return std::filesystem::temp_directory_path() /
-           ("reddish-" + std::string(name) + "-" +
-            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-            ".reddish");
-}
-
-void remove_dump(const std::filesystem::path &path)
-{
-    std::error_code error;
-    std::filesystem::remove(path, error);
-    std::filesystem::remove(path.string() + ".tmp", error);
-}
-
-} // namespace
-
 TEST_CASE("database stores strings and integers")
 {
     Database database;
@@ -122,6 +102,7 @@ TEST_CASE("database expires keys and evicts least recently used keys")
     database.set("second", "2");
     REQUIRE(database.get("first"));
     database.set("third", "3");
+    REQUIRE(database.evict_to(2, 128) == 1);
 
     auto evicted = database.get("second");
     REQUIRE(evicted);
@@ -141,21 +122,52 @@ TEST_CASE("database expires keys and evicts least recently used keys")
     CHECK(database.ttl("persistent") == -2);
 }
 
-TEST_CASE("database LRU key views survive keyspace rehashing")
+TEST_CASE("LRU survives keyspace rehashing")
 {
+    // Enough keys to force several rehashes of the bucket array.
     Database database(257);
     for (int index = 0; index < 257; ++index)
         database.set("key-" + std::to_string(index), "value");
 
+    // Touch the oldest key, then evict exactly the least recent remaining key.
     REQUIRE(database.get("key-0"));
     database.set("overflow", "value");
+    REQUIRE(database.evict_to(257, 128) == 1);
+
+    CHECK(database.stats().evictions == 1);
+    CHECK(database.stats().key_count == 257);
+    CHECK_FALSE(*database.get("key-1"));
 
     const auto most_recent = database.get("key-0");
-    const auto evicted = database.get("key-1");
     REQUIRE(most_recent);
-    CHECK(*most_recent);
-    REQUIRE(evicted);
-    CHECK_FALSE(*evicted);
+    REQUIRE(*most_recent);
+    CHECK(**most_recent == "value");
+}
+
+TEST_CASE("small keyspaces evict exactly the least recently used key")
+{
+    Database database(4);
+    database.set("a", "1");
+    database.set("b", "2");
+    database.set("c", "3");
+    database.set("d", "4");
+
+    REQUIRE(database.get("a"));
+    REQUIRE(database.get("b"));
+    database.set("e", "5");
+    REQUIRE(database.evict_to(4, 128) == 1);
+
+    auto oldest = database.get("c");
+    REQUIRE(oldest);
+    CHECK_FALSE(*oldest);
+    CHECK(database.stats().evictions == 1);
+
+    for (const auto key : {"a", "b", "d", "e"})
+    {
+        auto kept = database.get(key);
+        REQUIRE(kept);
+        CHECK(*kept);
+    }
 }
 
 TEST_CASE("database ignores stale expiry records")
@@ -186,77 +198,91 @@ TEST_CASE("database ignores stale expiry records")
     CHECK(**persistent == "new-value");
 }
 
-TEST_CASE("database snapshots round-trip and reject invalid input")
+TEST_CASE("large hash inserts and replacements promote safely")
 {
-    const auto path = temporary_dump_path("snapshot");
-    remove_dump(path);
-
-    Database source;
-    source.set("name", "reddish");
-    REQUIRE(source.increment("counter") == 1);
-    REQUIRE(source.push_right("items", std::string{"one"}) == 1);
-    REQUIRE(source.push_right("items", std::int64_t{2}) == 2);
-    REQUIRE(source.hash_set("meta", "version", std::int64_t{1}) == 1);
-    REQUIRE(source.dump_to_disk(path));
-    CHECK(std::filesystem::exists(path));
-    CHECK(source.stats().snapshot_bytes > 0);
-    CHECK(source.stats().last_dump_unix_ms > 0);
-
-    Database restored;
-    REQUIRE(restored.load_from_disk(path));
-    auto name = restored.get("name");
-    REQUIRE(name);
-    REQUIRE(*name);
-    CHECK(**name == "reddish");
-    REQUIRE(restored.list_length("items") == 2);
-    auto count = restored.hash_get("meta", "version");
-    REQUIRE(count);
-    REQUIRE(*count);
-    CHECK(std::get<std::int64_t>(**count) == 1);
-
-    Database too_small(1);
-    const auto capacity_error = too_small.load_from_disk(path);
-    REQUIRE_FALSE(capacity_error);
-    CHECK(capacity_error.error().code() == ErrorCode::dump_exceeds_key_capacity);
-
-    const auto corrupt_path = temporary_dump_path("corrupt");
+    for (bool replacement : {false, true})
     {
-        std::ofstream corrupt(corrupt_path, std::ios::binary);
-        corrupt << "not a snapshot";
+        Database db;
+        if (replacement) REQUIRE(db.hash_set_text("h", "f", "small"));
+        const std::string value(70000, 'x');
+        REQUIRE(db.hash_set_text("h", "f", value));
+        REQUIRE(db.hash_set_text("h", "neighbor", "untouched"));
+        auto got = db.hash_get("h", "f");
+        REQUIRE(got);
+        REQUIRE(*got);
+        CHECK(std::get<std::string>(**got) == value);
+        REQUIRE(db.hash_del("h", "f") == true);
+        CHECK(db.hash_length("h") == 1);
+        const std::string key(4100, 'k');
+        for (int i = 0; i < 130; ++i)
+            REQUIRE(db.hash_set_text(key, std::to_string(i), "v"));
+        REQUIRE(db.hash_get(key, "1"));
     }
-    const auto corrupt = restored.load_from_disk(corrupt_path);
-    REQUIRE_FALSE(corrupt);
-    CHECK(corrupt.error().code() == ErrorCode::disk_read_failed);
-
-    const auto absent = restored.load_from_disk(temporary_dump_path("missing"));
-    REQUIRE_FALSE(absent);
-    CHECK(absent.error().code() == ErrorCode::disk_read_failed);
-
-    const auto unwritable_path = temporary_dump_path("missing-parent") / "dump.reddish";
-    const auto write_failure = restored.dump_to_disk(unwritable_path);
-    REQUIRE_FALSE(write_failure);
-    CHECK(write_failure.error().code() == ErrorCode::disk_write_failed);
-
-    remove_dump(path);
-    remove_dump(corrupt_path);
 }
-
-TEST_CASE("database snapshots omit keys that expire before the dump")
+TEST_CASE("constant-length queues reuse packed capacity")
 {
-    const auto path = temporary_dump_path("expired");
-    remove_dump(path);
-
-    Database source;
-    source.set("temporary", "value");
-    REQUIRE(source.expire("temporary", 1));
+    for (bool left : {false, true})
+    {
+        Database db;
+        REQUIRE(db.push_right_text("q", "v"));
+        for (int i = 0; i < 100000; ++i)
+        {
+            if (left)
+            {
+                REQUIRE(db.push_left_text("q", "v"));
+                REQUIRE(db.pop_right("q"));
+            }
+            else
+            {
+                REQUIRE(db.push_right_text("q", "v"));
+                REQUIRE(db.pop_left("q"));
+            }
+        }
+        CHECK(db.list_length("q") == 1);
+        CHECK(db.stats().approximate_memory_bytes < 1024);
+    }
+}
+TEST_CASE("expiry rescheduling keeps one heap entry and follows grown nodes")
+{
+    Database db;
+    db.set("k", "v");
+    for (int i = 0; i < 10000; ++i)
+        REQUIRE(db.expire("k", 10));
+    CHECK(db.stats().approximate_memory_bytes < 2048);
+    db.set("other", "x");
+    REQUIRE(db.expire("other", 1));
+    REQUIRE(db.push_right_text("list", "x"));
+    REQUIRE(db.expire("list", 1));
+    REQUIRE(db.push_right_text("list", std::string(10000, 'x')));
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));
-    REQUIRE(source.dump_to_disk(path));
-
-    Database restored;
-    REQUIRE(restored.load_from_disk(path));
-    const auto value = restored.get("temporary");
-    REQUIRE(value);
-    CHECK_FALSE(*value);
-
-    remove_dump(path);
+    CHECK(db.list_length("list") == 0);
+    // A read observes expiry without changing the keyspace.
+    CHECK(db.key_count() == 3);
+    db.remove_expired(1);
+    CHECK(db.key_count() == 2);
+    db.remove_expired(1);
+    CHECK(db.key_count() == 1);
+    CHECK(db.ttl("k") >= 0);
+}
+TEST_CASE("large overwritten values and drained lists release excess storage")
+{
+    Database db;
+    db.set("k", std::string(70000, 'x'));
+    auto view = db.value_view("k");
+    REQUIRE(view);
+    REQUIRE(*view);
+    db.set("k", (*view)->text.substr(0, 1));
+    REQUIRE(db.get("k"));
+    CHECK(**db.get("k") == "x");
+    REQUIRE(db.push_right_text("q", std::string(70000, 'x')));
+    REQUIRE(db.push_right_text("q", "remaining"));
+    REQUIRE(db.expire("q", 20));
+    REQUIRE(db.pop_left("q"));
+    CHECK(db.list_length("q") == 1);
+    CHECK(db.ttl("q") >= 0);
+    CHECK(db.stats().approximate_memory_bytes < 4096);
+    auto remaining = db.pop_right("q");
+    REQUIRE(remaining);
+    REQUIRE(*remaining);
+    CHECK(std::get<std::string>(**remaining) == "remaining");
 }

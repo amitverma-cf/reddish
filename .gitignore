@@ -37,3 +37,13 @@ out
 *.exe
 *.out
 *.app
+
+# Runtime snapshot written by the server when --dump-path is left at its default
+dump.reddish
+
+# Write-ahead log and profiling output
+*.wal
+*.wal.lock
+callgrind.out.*
+__pycache__/
+*.pyc

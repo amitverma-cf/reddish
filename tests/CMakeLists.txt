@@ -1,5 +1,7 @@
 add_executable(reddish_tests
     database_tests.cpp
+    client_tests.cpp
+    wal_tests.cpp
     error_tests.cpp
     main_tests.cpp
     resp_tests.cpp
@@ -9,20 +11,29 @@ add_executable(reddish_tests
 )
 
 target_include_directories(reddish_tests PRIVATE ${catch2_SOURCE_DIR}/extras)
-target_link_libraries(reddish_tests PRIVATE reddish_core)
+target_link_libraries(reddish_tests PRIVATE reddish_core reddish_client)
+add_dependencies(reddish_tests reddish)
 target_compile_definitions(reddish_tests PRIVATE REDDISH_EXECUTABLE="$<TARGET_FILE:reddish>")
 
 add_test(NAME reddish_tests COMMAND reddish_tests)
+set_tests_properties(reddish_tests PROPERTIES TIMEOUT 120)
+find_package(Python3 3.9 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME process_integration COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/integration.py $<TARGET_FILE:reddish>)
+    set_tests_properties(process_integration PROPERTIES TIMEOUT 90)
+endif()
 
 add_test(NAME rejects_zero_port COMMAND $<TARGET_FILE:reddish> 0)
+add_test(NAME rejects_multiple_ports COMMAND $<TARGET_FILE:reddish> 6379 6380)
+set_tests_properties(rejects_multiple_ports PROPERTIES WILL_FAIL TRUE TIMEOUT 5)
 add_test(NAME rejects_out_of_range_port COMMAND $<TARGET_FILE:reddish> 65536)
-add_test(NAME rejects_missing_flag_value COMMAND $<TARGET_FILE:reddish> --load-dump)
+add_test(NAME rejects_missing_flag_value COMMAND $<TARGET_FILE:reddish> --wal-path)
 add_test(NAME rejects_zero_max_keys COMMAND $<TARGET_FILE:reddish> --max-keys 0)
-add_test(NAME rejects_invalid_dump_interval COMMAND $<TARGET_FILE:reddish> --dump-interval bad)
-add_test(NAME rejects_missing_dump_path COMMAND $<TARGET_FILE:reddish> --dump-path)
+add_test(NAME rejects_invalid_wal_sync COMMAND $<TARGET_FILE:reddish> --wal-sync bad)
+add_test(NAME rejects_missing_wal_sync COMMAND $<TARGET_FILE:reddish> --wal-sync)
 add_test(NAME rejects_invalid_max_keys COMMAND $<TARGET_FILE:reddish> --max-keys bad)
-add_test(NAME rejects_zero_dump_interval COMMAND $<TARGET_FILE:reddish> --dump-interval 0)
+add_test(NAME rejects_removed_snapshot_flag COMMAND $<TARGET_FILE:reddish> --dump-interval 0)
 
 set_tests_properties(rejects_zero_port rejects_out_of_range_port rejects_missing_flag_value
-                     rejects_zero_max_keys rejects_invalid_dump_interval rejects_missing_dump_path
-                     rejects_invalid_max_keys rejects_zero_dump_interval PROPERTIES WILL_FAIL TRUE)
+                     rejects_zero_max_keys rejects_invalid_wal_sync rejects_missing_wal_sync
+                     rejects_invalid_max_keys rejects_removed_snapshot_flag PROPERTIES WILL_FAIL TRUE)

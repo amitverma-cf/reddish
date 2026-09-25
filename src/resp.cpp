@@ -1,10 +1,9 @@
 #include "resp.hpp"
-#include "database.hpp"
 #include "error.hpp"
+
 #include <charconv>
+#include <cstring>
 #include <limits>
-#include <type_traits>
-#include <utility>
 
 namespace reddish
 {
@@ -12,40 +11,583 @@ namespace reddish
 namespace
 {
 
-Response response_from_value(const Value &value)
+// Folds up to eight name bytes to lower case and mixes in the name length, so a
+// single switch on the result identifies the command. The length is part of the
+// tag, which keeps a name containing embedded NULs from aliasing a shorter one.
+constexpr std::uint64_t tag_of(const char *text) noexcept
 {
-    return std::visit(
-        [](const auto &data) -> Response
-        {
-            using Data = std::decay_t<decltype(data)>;
-            if constexpr (std::is_same_v<Data, std::string>)
-            {
-                return Response{BulkString{data}};
-            }
-            else if constexpr (std::is_same_v<Data, std::int64_t>)
-            {
-                return Response{Integer{data}};
-            }
-            else if constexpr (std::is_same_v<Data, ListPtr>)
-            {
-                ResponseArray array;
-                for (const auto &element : data->values)
-                    array.values.push_back(response_from_value(element));
-                return Response{std::move(array)};
-            }
-            else
-            {
-                ResponseArray array;
-                for (const auto &[field, element] : data->fields)
-                {
-                    array.values.push_back(Response{BulkString{field}});
-                    array.values.push_back(response_from_value(element));
-                }
-                return Response{std::move(array)};
-            }
-        },
-        value);
+    std::uint64_t tag = 0;
+    std::size_t length = 0;
+    while (text[length] != '\0' && length < 8)
+        ++length;
+    for (std::size_t index = 0; index < length; ++index)
+        tag |= static_cast<std::uint64_t>(static_cast<unsigned char>(text[index]) | 0x20U)
+               << (index * 8);
+    return tag | (static_cast<std::uint64_t>(length) << 56);
 }
+
+std::uint64_t tag_of(std::string_view name) noexcept
+{
+    const std::size_t length = name.size() < 8 ? name.size() : 8;
+    std::uint64_t tag = 0;
+    for (std::size_t index = 0; index < length; ++index)
+        tag |= static_cast<std::uint64_t>(static_cast<unsigned char>(name[index]) | 0x20U)
+               << (index * 8);
+    return tag | (static_cast<std::uint64_t>(name.size() & 0xFFU) << 56);
+}
+
+constexpr std::size_t max_reply_bytes = 1024 * 1024;
+void require_reply_space(const std::string &output, std::size_t bytes)
+{
+    if (bytes > max_reply_bytes || output.size() > max_reply_bytes - bytes)
+        throw Error{ErrorCode::request_too_large};
+}
+
+// Integer formatting without a heap allocation or a stream.
+void append_decimal(std::int64_t value, std::string &output)
+{
+    char buffer[24];
+    const auto [end, error] = std::to_chars(buffer, buffer + sizeof(buffer), value);
+    if (error == std::errc{}) output.append(buffer, end);
+}
+
+void append_wrong_arguments(std::string &output, std::string_view name)
+{
+    append_error(output, std::string(error_message(ErrorCode::wrong_argument_count)) + " '" +
+                             std::string{name} + "' command");
+}
+
+void append_bulk_view(std::string &output, std::string_view text)
+{
+    if (text.size() > max_reply_bytes - 32) throw Error{ErrorCode::request_too_large};
+    require_reply_space(output, text.size() + 32);
+    output.push_back('$');
+    append_decimal(static_cast<std::int64_t>(text.size()), output);
+    output.append("\r\n", 2);
+    if (!text.empty()) output.append(text);
+    output.append("\r\n", 2);
+}
+
+void append_info(Database &database, const ServerStats &stats, bool memory_only,
+                 std::string &output)
+{
+    std::string response;
+    response.reserve(512);
+
+    if (!memory_only)
+    {
+        const auto uptime_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                                        std::chrono::steady_clock::now() - stats.started_at)
+                                        .count();
+        const auto database_stats = database.stats();
+
+        response += "# Server\r\n";
+        response += "uptime_seconds:" + std::to_string(uptime_seconds) + "\r\n";
+        response += "connected_clients:" + std::to_string(stats.connected_clients) + "\r\n";
+        response +=
+            "input_buffer_disconnects:" + std::to_string(stats.input_buffer_disconnects) + "\r\n";
+        response +=
+            "output_buffer_disconnects:" + std::to_string(stats.output_buffer_disconnects) + "\r\n";
+        response += "# Keyspace\r\n";
+        response += "keys:" + std::to_string(database_stats.key_count) + "\r\n";
+        response += "evictions:" + std::to_string(database_stats.evictions) + "\r\n";
+        response += "expired_keys:" + std::to_string(database_stats.expired_keys) + "\r\n";
+        response += "# Memory\r\n";
+        response +=
+            "used_memory_bytes:" + std::to_string(database_stats.approximate_memory_bytes) + "\r\n";
+        response += "wal_bytes:" + std::to_string(database_stats.wal_bytes) + "\r\n";
+        response +=
+            "reserved_memory_bytes:" + std::to_string(database_stats.reserved_memory_bytes) +
+            "\r\n";
+    }
+    else
+    {
+        const auto database_stats = database.stats();
+        response += "# Memory\r\n";
+        response +=
+            "used_memory_bytes:" + std::to_string(database_stats.approximate_memory_bytes) + "\r\n";
+        response += "wal_bytes:" + std::to_string(database_stats.wal_bytes) + "\r\n";
+        response +=
+            "reserved_memory_bytes:" + std::to_string(database_stats.reserved_memory_bytes) +
+            "\r\n";
+    }
+
+    append_bulk_view(output, response);
+}
+
+void execute_ping(const Command &, Database &, const ServerStats &, std::string &output)
+{
+    // The hottest command in the suite is a constant, so it writes the reply
+    // bytes directly instead of building and re-encoding a response object.
+    output.append("+PONG\r\n", 7);
+}
+
+void execute_set(const Command &command, Database &database, const ServerStats &,
+                 std::string &output)
+{
+    const auto &arguments = command.arguments;
+    if (arguments.size() != 2)
+    {
+        append_wrong_arguments(output, "set");
+        return;
+    }
+
+    database.set(arguments[0], arguments[1]);
+    append_simple_string(output, "OK");
+}
+
+void execute_get(const Command &command, Database &database, const ServerStats &,
+                 std::string &output)
+{
+    const auto &arguments = command.arguments;
+    if (arguments.size() != 1)
+    {
+        append_wrong_arguments(output, "get");
+        return;
+    }
+
+    const auto value = database.value_view(arguments[0]);
+    if (!value)
+    {
+        append_error(output, error_message(value.error().code()));
+        return;
+    }
+    if (!*value)
+    {
+        append_null(output);
+        return;
+    }
+
+    if ((*value)->kind == ValueView::Kind::integer)
+    {
+        // Redis always answers GET with a bulk string, including for values that
+        // are stored as integers.
+        append_bulk_string(output, std::to_string((*value)->integer));
+        return;
+    }
+    if ((*value)->kind != ValueView::Kind::string)
+    {
+        append_error(output, error_message(ErrorCode::wrong_type));
+        return;
+    }
+    append_bulk_view(output, (*value)->text);
+}
+
+void execute_increment(const Command &command, Database &database, const ServerStats &,
+                       std::string &output)
+{
+    const auto &arguments = command.arguments;
+    if (arguments.size() != 1)
+    {
+        append_wrong_arguments(output, "incr");
+        return;
+    }
+
+    const auto value = database.increment(arguments[0]);
+    if (!value)
+    {
+        append_error(output, error_message(value.error().code()));
+        return;
+    }
+    append_integer(output, *value);
+}
+
+void execute_list_push(const Command &command, Database &database, const ServerStats &,
+                       std::string &output, bool front)
+{
+    const auto &arguments = command.arguments;
+    if (arguments.size() < 2)
+    {
+        append_wrong_arguments(output, command.name);
+        return;
+    }
+
+    Result<std::int64_t> length = std::int64_t{0};
+    for (std::size_t index = 1; index < arguments.size(); ++index)
+    {
+        length = front ? database.push_left_text(arguments[0], arguments[index])
+                       : database.push_right_text(arguments[0], arguments[index]);
+        if (!length) break;
+    }
+
+    if (!length)
+    {
+        append_error(output, error_message(length.error().code()));
+        return;
+    }
+    append_integer(output, *length);
+}
+
+void execute_list_pop(const Command &command, Database &database, const ServerStats &,
+                      std::string &output, bool front)
+{
+    const auto &arguments = command.arguments;
+    if (arguments.size() != 1)
+    {
+        append_wrong_arguments(output, command.name);
+        return;
+    }
+
+    const auto value = front ? database.pop_left(arguments[0]) : database.pop_right(arguments[0]);
+    if (!value)
+    {
+        append_error(output, error_message(value.error().code()));
+        return;
+    }
+    if (!*value)
+    {
+        append_null(output);
+        return;
+    }
+
+    if (const auto *text = std::get_if<std::string>(&**value)) append_bulk_view(output, *text);
+    else append_bulk_string(output, std::to_string(std::get<std::int64_t>(**value)));
+}
+
+void execute_list_length(const Command &command, Database &database, const ServerStats &,
+                         std::string &output)
+{
+    const auto &arguments = command.arguments;
+    if (arguments.size() != 1)
+    {
+        append_wrong_arguments(output, "llen");
+        return;
+    }
+
+    const auto length = database.list_length(arguments[0]);
+    if (!length)
+    {
+        append_error(output, error_message(length.error().code()));
+        return;
+    }
+    append_integer(output, *length);
+}
+
+void execute_hash_set(const Command &command, Database &database, const ServerStats &,
+                      std::string &output)
+{
+    const auto &arguments = command.arguments;
+    if (arguments.size() < 3 || arguments.size() % 2 == 0)
+    {
+        append_wrong_arguments(output, "hset");
+        return;
+    }
+
+    std::int64_t added = 0;
+    for (std::size_t index = 1; index < arguments.size(); index += 2)
+    {
+        const auto result =
+            database.hash_set_text(arguments[0], arguments[index], arguments[index + 1]);
+        if (!result)
+        {
+            append_error(output, error_message(result.error().code()));
+            return;
+        }
+        added += *result;
+    }
+    append_integer(output, added);
+}
+
+void execute_hash_get(const Command &command, Database &database, const ServerStats &,
+                      std::string &output)
+{
+    const auto &arguments = command.arguments;
+    if (arguments.size() != 2)
+    {
+        append_wrong_arguments(output, "hget");
+        return;
+    }
+
+    // The packed representation is read in place, so a hash read copies nothing.
+    const auto value = database.hash_field(arguments[0], arguments[1]);
+    if (!value)
+    {
+        append_error(output, error_message(value.error().code()));
+        return;
+    }
+    if (!*value)
+    {
+        append_null(output);
+        return;
+    }
+
+    if ((*value)->kind == ValueView::Kind::integer)
+    {
+        append_bulk_string(output, std::to_string((*value)->integer));
+        return;
+    }
+    append_bulk_view(output, (*value)->text);
+}
+
+void execute_hash_del(const Command &command, Database &database, const ServerStats &,
+                      std::string &output)
+{
+    const auto &arguments = command.arguments;
+    if (arguments.size() != 2)
+    {
+        append_wrong_arguments(output, "hdel");
+        return;
+    }
+
+    const auto removed = database.hash_del(arguments[0], arguments[1]);
+    if (!removed)
+    {
+        append_error(output, error_message(removed.error().code()));
+        return;
+    }
+    append_integer(output, *removed ? 1 : 0);
+}
+
+void execute_hash_length(const Command &command, Database &database, const ServerStats &,
+                         std::string &output)
+{
+    const auto &arguments = command.arguments;
+    if (arguments.size() != 1)
+    {
+        append_wrong_arguments(output, "hlen");
+        return;
+    }
+
+    const auto length = database.hash_length(arguments[0]);
+    if (!length)
+    {
+        append_error(output, error_message(length.error().code()));
+        return;
+    }
+    append_integer(output, *length);
+}
+
+void execute_expire(const Command &command, Database &database, const ServerStats &,
+                    std::string &output)
+{
+    const auto &arguments = command.arguments;
+    if (arguments.size() != 2)
+    {
+        append_wrong_arguments(output, "expire");
+        return;
+    }
+
+    std::int64_t seconds = 0;
+    const auto text = arguments[1];
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), seconds);
+    if (error != std::errc{} || end != text.data() + text.size())
+    {
+        append_error(output, error_message(ErrorCode::value_not_integer));
+        return;
+    }
+    try
+    {
+        append_integer(output, database.expire(arguments[0], seconds) ? 1 : 0);
+    }
+    catch (const Error &error)
+    {
+        if (error.code() != ErrorCode::value_not_integer) throw;
+        append_error(output, error_message(error.code()));
+    }
+}
+
+void execute_ttl(const Command &command, Database &database, const ServerStats &,
+                 std::string &output)
+{
+    const auto &arguments = command.arguments;
+    if (arguments.size() != 1)
+    {
+        append_wrong_arguments(output, "ttl");
+        return;
+    }
+    append_integer(output, database.ttl(arguments[0]));
+}
+
+void execute_del(const Command &command, Database &database, const ServerStats &,
+                 std::string &output)
+{
+    const auto &arguments = command.arguments;
+    if (arguments.empty())
+    {
+        append_wrong_arguments(output, "del");
+        return;
+    }
+
+    std::int64_t deleted = 0;
+    for (const auto key : arguments)
+        if (database.del(key)) ++deleted;
+    append_integer(output, deleted);
+}
+
+} // namespace
+
+// --- reply writers ---------------------------------------------------------
+
+void append_simple_string(std::string &output, std::string_view text)
+{
+    require_reply_space(output, text.size() + 3);
+    output.push_back('+');
+    output.append(text);
+    output.append("\r\n", 2);
+}
+
+void append_error(std::string &output, std::string_view text)
+{
+    require_reply_space(output, text.size() + 3);
+    output.push_back('-');
+    output.append(text);
+    output.append("\r\n", 2);
+}
+
+void append_integer(std::string &output, std::int64_t value)
+{
+    require_reply_space(output, 24);
+    output.push_back(':');
+    append_decimal(value, output);
+    output.append("\r\n", 2);
+}
+
+void append_bulk_string(std::string &output, std::string_view text)
+{
+    append_bulk_view(output, text);
+}
+
+void append_null(std::string &output)
+{
+    require_reply_space(output, 5);
+    output.append("$-1\r\n", 5);
+}
+
+void append_array_header(std::string &output, std::int64_t count)
+{
+    require_reply_space(output, 24);
+    output.push_back('*');
+    append_decimal(count, output);
+    output.append("\r\n", 2);
+}
+
+// --- dispatch --------------------------------------------------------------
+
+CommandInfo classify_command(std::string_view name) noexcept
+{
+    switch (tag_of(name))
+    {
+    case tag_of("ping"):
+        return {CommandId::ping, false};
+    case tag_of("info"):
+        return {CommandId::info, false};
+    case tag_of("get"):
+        return {CommandId::get, false};
+    case tag_of("set"):
+        return {CommandId::set, true};
+    case tag_of("incr"):
+        return {CommandId::increment, true};
+    case tag_of("lpush"):
+        return {CommandId::list_push_left, true};
+    case tag_of("rpush"):
+        return {CommandId::list_push_right, true};
+    case tag_of("lpop"):
+        return {CommandId::list_pop_left, true};
+    case tag_of("rpop"):
+        return {CommandId::list_pop_right, true};
+    case tag_of("llen"):
+        return {CommandId::list_length, false};
+    case tag_of("hset"):
+        return {CommandId::hash_set, true};
+    case tag_of("hget"):
+        return {CommandId::hash_get, false};
+    case tag_of("hdel"):
+        return {CommandId::hash_del, true};
+    case tag_of("hlen"):
+        return {CommandId::hash_length, false};
+    case tag_of("expire"):
+        return {CommandId::expire, true};
+    case tag_of("ttl"):
+        return {CommandId::ttl, false};
+    case tag_of("del"):
+        return {CommandId::del, true};
+    default:
+        return {CommandId::unknown, true};
+    }
+}
+
+void execute_into(const Command &command, Database &database, const ServerStats &stats,
+                  std::string &output)
+{
+    switch (classify_command(command.name).id)
+    {
+    case CommandId::ping:
+        execute_ping(command, database, stats, output);
+        return;
+    case CommandId::info:
+    {
+        const auto &arguments = command.arguments;
+        if (arguments.size() > 1)
+        {
+            append_wrong_arguments(output, "info");
+            return;
+        }
+        const bool memory_only = !arguments.empty() && arguments[0] == "memory";
+        if (!arguments.empty() && !memory_only)
+        {
+            append_error(output, error_message(ErrorCode::unsupported_info_section));
+            return;
+        }
+        append_info(database, stats, memory_only, output);
+        return;
+    }
+    case CommandId::get:
+        execute_get(command, database, stats, output);
+        return;
+    case CommandId::set:
+        execute_set(command, database, stats, output);
+        return;
+    case CommandId::increment:
+        execute_increment(command, database, stats, output);
+        return;
+    case CommandId::list_push_left:
+        execute_list_push(command, database, stats, output, true);
+        return;
+    case CommandId::list_push_right:
+        execute_list_push(command, database, stats, output, false);
+        return;
+    case CommandId::list_pop_left:
+        execute_list_pop(command, database, stats, output, true);
+        return;
+    case CommandId::list_pop_right:
+        execute_list_pop(command, database, stats, output, false);
+        return;
+    case CommandId::list_length:
+        execute_list_length(command, database, stats, output);
+        return;
+    case CommandId::hash_set:
+        execute_hash_set(command, database, stats, output);
+        return;
+    case CommandId::hash_get:
+        execute_hash_get(command, database, stats, output);
+        return;
+    case CommandId::hash_del:
+        execute_hash_del(command, database, stats, output);
+        return;
+    case CommandId::hash_length:
+        execute_hash_length(command, database, stats, output);
+        return;
+    case CommandId::expire:
+        execute_expire(command, database, stats, output);
+        return;
+    case CommandId::ttl:
+        execute_ttl(command, database, stats, output);
+        return;
+    case CommandId::del:
+        execute_del(command, database, stats, output);
+        return;
+    case CommandId::unknown:
+        break;
+    }
+
+    append_error(output, std::string(error_message(ErrorCode::unknown_command)) + " '" +
+                             std::string{command.name} + "'");
+}
+
+// --- parsing ---------------------------------------------------------------
+
+namespace
+{
 
 template <typename T> Result<T> parse_number(std::string_view input, ErrorCode error_code)
 {
@@ -56,159 +598,53 @@ template <typename T> Result<T> parse_number(std::string_view input, ErrorCode e
     return value;
 }
 
-bool command_is(std::string_view command, std::string_view expected)
-{
-    if (command.size() != expected.size()) return false;
-
-    for (std::size_t index = 0; index < command.size(); ++index)
-    {
-        const auto character = command[index];
-        if (character != expected[index] && character != expected[index] + ('a' - 'A'))
-            return false;
-    }
-    return true;
-}
-
-void append_decimal(std::int64_t value, std::string &output)
-{
-    char buffer[std::numeric_limits<std::int64_t>::digits10 + 3];
-    const auto [end, error] = std::to_chars(buffer, buffer + sizeof(buffer), value);
-    if (error == std::errc{}) output.append(buffer, end);
-}
-
-std::size_t decimal_size(std::int64_t value)
-{
-    char buffer[std::numeric_limits<std::int64_t>::digits10 + 3];
-    const auto [end, error] = std::to_chars(buffer, buffer + sizeof(buffer), value);
-    return error == std::errc{} ? static_cast<std::size_t>(end - buffer) : 0;
-}
-
-std::size_t encoded_response_size_impl(const Response &response)
-{
-    return std::visit(
-        [](const auto &data) -> std::size_t
-        {
-            using T = std::decay_t<decltype(data)>;
-            if constexpr (std::is_same_v<T, SimpleString>)
-            {
-                return 3 + data.value.size();
-            }
-            else if constexpr (std::is_same_v<T, ErrorResponse>)
-            {
-                return 3 + data.message.size();
-            }
-            else if constexpr (std::is_same_v<T, Integer>)
-            {
-                return 3 + decimal_size(data.value);
-            }
-            else if constexpr (std::is_same_v<T, BulkString> || std::is_same_v<T, BulkStringView>)
-            {
-                return 5 + decimal_size(static_cast<std::int64_t>(data.value.size())) +
-                       data.value.size();
-            }
-            else if constexpr (std::is_same_v<T, Null>)
-            {
-                return 5;
-            }
-            else
-            {
-                std::size_t size = 3 + decimal_size(static_cast<std::int64_t>(data.values.size()));
-                for (const auto &element : data.values)
-                    size += encoded_response_size_impl(element);
-                return size;
-            }
-        },
-        response.data);
-}
-
-void append_encoded_response_impl(const Response &response, std::string &output)
-{
-    std::visit(
-        [&](const auto &data)
-        {
-            using T = std::decay_t<decltype(data)>;
-            if constexpr (std::is_same_v<T, SimpleString>)
-            {
-                output.push_back('+');
-                output += data.value;
-                output.append("\r\n", 2);
-            }
-            else if constexpr (std::is_same_v<T, ErrorResponse>)
-            {
-                output.push_back('-');
-                output += data.message;
-                output.append("\r\n", 2);
-            }
-            else if constexpr (std::is_same_v<T, Integer>)
-            {
-                output.push_back(':');
-                append_decimal(data.value, output);
-                output.append("\r\n", 2);
-            }
-            else if constexpr (std::is_same_v<T, BulkString> || std::is_same_v<T, BulkStringView>)
-            {
-                output.push_back('$');
-                append_decimal(static_cast<std::int64_t>(data.value.size()), output);
-                output.append("\r\n", 2);
-                output += data.value;
-                output.append("\r\n", 2);
-            }
-            else if constexpr (std::is_same_v<T, Null>)
-            {
-                output += "$-1\r\n";
-            }
-            else if constexpr (std::is_same_v<T, ResponseArray>)
-            {
-                output.push_back('*');
-                append_decimal(static_cast<std::int64_t>(data.values.size()), output);
-                output.append("\r\n", 2);
-                for (const auto &element : data.values)
-                    append_encoded_response_impl(element, output);
-            }
-        },
-        response.data);
-}
-
 } // namespace
 
-Result<Command> parse_command(std::string_view input)
+Result<void> parse_command_into(std::string_view input, Command &command)
 {
-    std::size_t pos = 0;
-    auto readline = [&]() -> Result<std::string_view>
+    command.arguments.clear();
+    command.name = {};
+    command.bytes_consumed = 0;
+
+    if (input.empty()) return std::unexpected(Error{ErrorCode::empty_resp_input});
+    if (input[0] != '*') return std::unexpected(Error{ErrorCode::expected_resp_array_prefix});
+
+    std::size_t pos = 1;
+    const auto readline = [&]() -> Result<std::string_view>
     {
-        size_t end = input.find("\r\n", pos);
-        if (end == std::string::npos) return std::unexpected(Error{ErrorCode::missing_crlf});
+        const std::size_t end = input.find("\r\n", pos);
+        if (end == std::string_view::npos) return std::unexpected(Error{ErrorCode::missing_crlf});
         const auto line = input.substr(pos, end - pos);
         pos = end + 2;
         return line;
     };
-    if (input.empty()) return std::unexpected(Error{ErrorCode::empty_resp_input});
-    if (input[0] != '*') return std::unexpected(Error{ErrorCode::expected_resp_array_prefix});
-    pos++;
-    auto argc_result = readline();
-    if (!argc_result.has_value()) return std::unexpected(argc_result.error());
+
+    const auto argc_result = readline();
+    if (!argc_result) return std::unexpected(argc_result.error());
     const auto argc =
         parse_number<std::size_t>(argc_result.value(), ErrorCode::invalid_resp_array_length);
     if (!argc) return std::unexpected(argc.error());
     if (*argc == 0) return std::unexpected(Error{ErrorCode::empty_resp_array});
-    Command cmd;
-    cmd.arguments.reserve(*argc - 1);
-    for (std::size_t i = 0; i < *argc; i++)
+
+    for (std::size_t index = 0; index < *argc; ++index)
     {
         if (pos >= input.size())
             return std::unexpected(Error{ErrorCode::missing_bulk_string_prefix});
         if (input[pos++] != '$')
             return std::unexpected(Error{ErrorCode::expected_bulk_string_prefix});
-        auto len_result = readline();
-        if (!len_result.has_value()) return std::unexpected(len_result.error());
+
+        const auto length_result = readline();
+        if (!length_result) return std::unexpected(length_result.error());
         const auto length =
-            parse_number<std::size_t>(len_result.value(), ErrorCode::invalid_bulk_string_length);
+            parse_number<std::size_t>(length_result.value(), ErrorCode::invalid_bulk_string_length);
         if (!length) return std::unexpected(length.error());
         if (pos > input.size() || input.size() - pos < 2 || *length > input.size() - pos - 2)
             return std::unexpected(Error{ErrorCode::incomplete_bulk_string_data});
+
         const auto value = input.substr(pos, *length);
-        if (i == 0) cmd.name = value;
-        else cmd.arguments.emplace_back(value);
+        if (index == 0) command.name = value;
+        else command.arguments.push_back(value);
+
         pos += *length;
         if (input.size() - pos < 2)
             return std::unexpected(Error{ErrorCode::missing_bulk_string_terminator});
@@ -216,251 +652,17 @@ Result<Command> parse_command(std::string_view input)
             return std::unexpected(Error{ErrorCode::missing_bulk_string_terminator});
         pos += 2;
     }
-    cmd.bytes_consumed = pos;
-    return cmd;
+
+    command.bytes_consumed = pos;
+    return {};
 }
 
-Response execute_command(const Command &command, Database &database, const ServerStats &stats)
+Result<Command> parse_command(std::string_view input)
 {
-    const auto &arguments = command.arguments;
-
-    if (command_is(command.name, "PING")) return Response{SimpleString{"PONG"}};
-
-    if (command_is(command.name, "INFO"))
-    {
-        if (arguments.size() > 1)
-            return Response{ErrorResponse{
-                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'info' command"}};
-
-        const bool memory_only = !arguments.empty() && arguments[0] == "memory";
-        if (!arguments.empty() && !memory_only)
-            return Response{
-                ErrorResponse{std::string(error_message(ErrorCode::unsupported_info_section))}};
-
-        const auto database_stats = database.stats();
-        const auto uptime_seconds = std::chrono::duration_cast<std::chrono::seconds>(
-                                        std::chrono::steady_clock::now() - stats.started_at)
-                                        .count();
-        std::string response;
-        if (!memory_only)
-        {
-            response += "# Server\r\n";
-            response += "uptime_seconds:" + std::to_string(uptime_seconds) + "\r\n";
-            response += "connected_clients:" + std::to_string(stats.connected_clients) + "\r\n";
-            response +=
-                "input_buffer_disconnects:" + std::to_string(stats.input_buffer_disconnects) +
-                "\r\n";
-            response +=
-                "output_buffer_disconnects:" + std::to_string(stats.output_buffer_disconnects) +
-                "\r\n";
-            response += "# Keyspace\r\n";
-            response += "keys:" + std::to_string(database_stats.key_count) + "\r\n";
-            response += "evictions:" + std::to_string(database_stats.evictions) + "\r\n";
-            response += "expired_keys:" + std::to_string(database_stats.expired_keys) + "\r\n";
-        }
-        response += "# Memory\r\n";
-        response +=
-            "used_memory_bytes:" + std::to_string(database_stats.approximate_memory_bytes) + "\r\n";
-        response += "snapshot_bytes:" + std::to_string(database_stats.snapshot_bytes) + "\r\n";
-        response +=
-            "last_dump_unix_ms:" + std::to_string(database_stats.last_dump_unix_ms) + "\r\n";
-        return Response{BulkString{std::move(response)}};
-    }
-
-    if (command_is(command.name, "SET"))
-    {
-        if (arguments.size() != 2)
-            return Response{ErrorResponse{
-                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'set' command"}};
-
-        database.set(arguments[0], arguments[1]);
-        return Response{SimpleString{"OK"}};
-    }
-
-    if (command_is(command.name, "GET"))
-    {
-        if (arguments.size() != 1)
-            return Response{ErrorResponse{
-                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'get' command"}};
-
-        const auto value = database.get_value(command.arguments[0]);
-        if (!value)
-            return Response{ErrorResponse{std::string(error_message(value.error().code()))}};
-        if (!*value) return Response{Null{}};
-        if (const auto *text = std::get_if<std::string>(&value->value().get()))
-            return Response{BulkStringView{*text}};
-        if (const auto *integer = std::get_if<std::int64_t>(&value->value().get()))
-            return Response{BulkString{std::to_string(*integer)}};
-        return Response{ErrorResponse{std::string(error_message(ErrorCode::wrong_type))}};
-    }
-
-    if (command_is(command.name, "INCR"))
-    {
-        if (arguments.size() != 1)
-            return Response{ErrorResponse{
-                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'incr' command"}};
-
-        const auto value = database.increment(arguments[0]);
-        if (!value)
-            return Response{ErrorResponse{std::string(error_message(value.error().code()))}};
-        return Response{Integer{*value}};
-    }
-
-    if (command_is(command.name, "LPUSH") || command_is(command.name, "RPUSH"))
-    {
-        if (arguments.size() < 2)
-            return Response{
-                ErrorResponse{std::string(error_message(ErrorCode::wrong_argument_count)) + " '" +
-                              std::string(command.name) + "' command"}};
-
-        Result<std::int64_t> length = std::int64_t{0};
-        for (std::size_t index = 1; index < arguments.size(); ++index)
-        {
-            length = command_is(command.name, "LPUSH")
-                         ? database.push_left(arguments[0], Value{std::string{arguments[index]}})
-                         : database.push_right(arguments[0], Value{std::string{arguments[index]}});
-            if (!length)
-                return Response{ErrorResponse{std::string(error_message(length.error().code()))}};
-        }
-        return Response{Integer{*length}};
-    }
-
-    if (command_is(command.name, "LPOP") || command_is(command.name, "RPOP"))
-    {
-        if (arguments.size() != 1)
-            return Response{
-                ErrorResponse{std::string(error_message(ErrorCode::wrong_argument_count)) + " '" +
-                              std::string(command.name) + "' command"}};
-
-        const auto value = command_is(command.name, "LPOP") ? database.pop_left(arguments[0])
-                                                            : database.pop_right(arguments[0]);
-        if (!value)
-            return Response{ErrorResponse{std::string(error_message(value.error().code()))}};
-        if (!*value) return Response{Null{}};
-        return response_from_value(**value);
-    }
-
-    if (command_is(command.name, "LLEN"))
-    {
-        if (arguments.size() != 1)
-            return Response{ErrorResponse{
-                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'llen' command"}};
-
-        const auto length = database.list_length(arguments[0]);
-        if (!length)
-            return Response{ErrorResponse{std::string(error_message(length.error().code()))}};
-        return Response{Integer{*length}};
-    }
-
-    if (command_is(command.name, "HSET"))
-    {
-        if (arguments.size() < 3 || arguments.size() % 2 == 0)
-            return Response{ErrorResponse{
-                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'hset' command"}};
-
-        std::int64_t added = 0;
-        for (std::size_t index = 1; index < arguments.size(); index += 2)
-        {
-            const auto result = database.hash_set(arguments[0], arguments[index],
-                                                  Value{std::string{arguments[index + 1]}});
-            if (!result)
-                return Response{ErrorResponse{std::string(error_message(result.error().code()))}};
-            added += *result;
-        }
-        return Response{Integer{added}};
-    }
-
-    if (command_is(command.name, "HGET"))
-    {
-        if (arguments.size() != 2)
-            return Response{ErrorResponse{
-                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'hget' command"}};
-
-        const auto value = database.hash_get(arguments[0], arguments[1]);
-        if (!value)
-            return Response{ErrorResponse{std::string(error_message(value.error().code()))}};
-        if (!*value) return Response{Null{}};
-        return response_from_value(**value);
-    }
-
-    if (command_is(command.name, "HDEL"))
-    {
-        if (arguments.size() != 2)
-            return Response{ErrorResponse{
-                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'hdel' command"}};
-
-        const auto removed = database.hash_del(arguments[0], arguments[1]);
-        if (!removed)
-            return Response{ErrorResponse{std::string(error_message(removed.error().code()))}};
-        return Response{Integer{*removed ? 1 : 0}};
-    }
-
-    if (command_is(command.name, "HLEN"))
-    {
-        if (arguments.size() != 1)
-            return Response{ErrorResponse{
-                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'hlen' command"}};
-
-        const auto length = database.hash_length(arguments[0]);
-        if (!length)
-            return Response{ErrorResponse{std::string(error_message(length.error().code()))}};
-        return Response{Integer{*length}};
-    }
-
-    if (command_is(command.name, "EXPIRE"))
-    {
-        if (arguments.size() != 2)
-            return Response{ErrorResponse{
-                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'expire' command"}};
-
-        const auto seconds = parse_number<std::int64_t>(arguments[1], ErrorCode::value_not_integer);
-        if (!seconds)
-            return Response{ErrorResponse{std::string(error_message(seconds.error().code()))}};
-        return Response{Integer{database.expire(arguments[0], *seconds) ? 1 : 0}};
-    }
-
-    if (command_is(command.name, "TTL"))
-    {
-        if (arguments.size() != 1)
-            return Response{ErrorResponse{
-                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'ttl' command"}};
-
-        return Response{Integer{database.ttl(arguments[0])}};
-    }
-
-    if (command_is(command.name, "DEL"))
-    {
-        if (arguments.empty())
-            return Response{ErrorResponse{
-                std::string(error_message(ErrorCode::wrong_argument_count)) + " 'del' command"}};
-
-        std::int64_t deleted = 0;
-        for (const auto &key : arguments)
-            deleted += database.del(key) ? 1 : 0;
-        return Response{Integer{deleted}};
-    }
-
-    return Response{ErrorResponse{std::string(error_message(ErrorCode::unknown_command)) + " '" +
-                                  std::string{command.name} + "'"}};
-}
-
-std::string encode_response(const Response &response)
-{
-    std::string output;
-    output.reserve(encoded_response_size_impl(response));
-    append_encoded_response_impl(response, output);
-    return output;
-}
-
-std::size_t encoded_response_size(const Response &response)
-{
-    return encoded_response_size_impl(response);
-}
-
-void append_encoded_response(const Response &response, std::string &output)
-{
-    output.reserve(output.size() + encoded_response_size_impl(response));
-    append_encoded_response_impl(response, output);
+    Command command;
+    const auto parsed = parse_command_into(input, command);
+    if (!parsed) return std::unexpected(parsed.error());
+    return command;
 }
 
 } // namespace reddish

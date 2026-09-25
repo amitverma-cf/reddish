@@ -95,6 +95,15 @@ class ClientSocket
         return ::recv(handle_, &byte, 1, 0) <= 0;
     }
 
+    void shutdown_write()
+    {
+#ifdef _WIN32
+        ::shutdown(handle_, SD_SEND);
+#else
+        ::shutdown(handle_, SHUT_WR);
+#endif
+    }
+
   private:
 #ifdef _WIN32
     SOCKET handle_;
@@ -124,7 +133,7 @@ TEST_CASE("server accepts TCP commands and cleanly stops")
     std::filesystem::remove(dump_path, error);
 
     stop_server = false;
-    Server server({port, 32, std::chrono::hours(1), dump_path});
+    Server server({port, 32});
     std::exception_ptr server_error;
     std::thread thread(
         [&]
@@ -150,7 +159,7 @@ TEST_CASE("server accepts TCP commands and cleanly stops")
     stop_server = true;
     thread.join();
     CHECK_FALSE(server_error);
-    CHECK(std::filesystem::exists(dump_path));
+    CHECK_FALSE(std::filesystem::exists(dump_path));
     std::filesystem::remove(dump_path, error);
 }
 
@@ -164,7 +173,7 @@ TEST_CASE("server reports and disconnects an oversized input buffer")
     std::filesystem::remove(dump_path, error);
 
     stop_server = false;
-    Server server({port, 32, std::chrono::hours(1), dump_path});
+    Server server({port, 32});
     std::exception_ptr server_error;
     std::thread thread(
         [&]
@@ -200,7 +209,7 @@ TEST_CASE("server reports malformed RESP before closing the connection")
     std::filesystem::remove(dump_path, error);
 
     stop_server = false;
-    Server server({port, 32, std::chrono::hours(1), dump_path});
+    Server server({port, 32});
     std::exception_ptr server_error;
     std::thread thread(
         [&]
@@ -228,6 +237,48 @@ TEST_CASE("server reports malformed RESP before closing the connection")
     std::filesystem::remove(dump_path, error);
 }
 
+TEST_CASE("server still replies to a client that half closes its connection")
+{
+    SocketSystem socket_system;
+    const auto port = find_open_port();
+    const auto dump_path =
+        std::filesystem::temp_directory_path() / "reddish-half-close-test.reddish";
+    std::error_code error;
+    std::filesystem::remove(dump_path, error);
+
+    stop_server = false;
+    Server server({port, 32});
+    std::exception_ptr server_error;
+    std::thread thread(
+        [&]
+        {
+            try
+            {
+                server.start(should_stop_server);
+            }
+            catch (...)
+            {
+                server_error = std::current_exception();
+            }
+        });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    ClientSocket client;
+    REQUIRE(client.connect(port));
+
+    // Send the whole pipeline and then close our write side immediately. The
+    // replies are still owed to us, so the server must flush them before closing.
+    client.send_all("*3\r\n$3\r\nSET\r\n$4\r\nname\r\n$7\r\nreddish\r\n"
+                    "*2\r\n$3\r\nGET\r\n$4\r\nname\r\n");
+    client.shutdown_write();
+    CHECK(client.receive_until("$7\r\nreddish\r\n") == "+OK\r\n$7\r\nreddish\r\n");
+
+    stop_server = true;
+    thread.join();
+    CHECK_FALSE(server_error);
+    std::filesystem::remove(dump_path, error);
+}
+
 TEST_CASE("server disconnects clients when queued responses exceed the output limit")
 {
     SocketSystem socket_system;
@@ -237,7 +288,7 @@ TEST_CASE("server disconnects clients when queued responses exceed the output li
     std::filesystem::remove(dump_path, error);
 
     stop_server = false;
-    Server server({port, 32, std::chrono::hours(1), dump_path});
+    Server server({port, 32});
     std::exception_ptr server_error;
     std::thread thread(
         [&]

@@ -42,11 +42,9 @@ std::string_view error_message(ErrorCode code)
     case ErrorCode::request_too_large:
         return "ERR request exceeds maximum buffer size";
     case ErrorCode::disk_write_failed:
-        return "Failed to write database dump";
+        return "Failed to write WAL";
     case ErrorCode::disk_read_failed:
-        return "Failed to read database dump";
-    case ErrorCode::dump_exceeds_key_capacity:
-        return "Dump contains more keys than --max-keys allows";
+        return "Failed to read WAL";
     case ErrorCode::socket_startup_failed:
         return "Failed to initialize socket system";
     case ErrorCode::socket_poll_failed:
