@@ -1,10 +1,10 @@
-name: Benchmark summary
+name: Benchmark artifacts
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: benchmark-summary
@@ -15,16 +15,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out main
+      - name: Check out selected revision
         uses: actions/checkout@v4
-        with:
-          ref: main
 
       - name: Install benchmark dependencies
         run: |
           sudo add-apt-repository --yes universe
           sudo apt-get update
-          sudo apt-get install --yes curl gpg lsb-release software-properties-common redis-server valkey-server memcached
+          sudo apt-get install --yes curl gpg lsb-release software-properties-common redis-server valkey-server memcached valgrind
           curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" \
             | sudo tee /etc/apt/sources.list.d/redis.list
@@ -34,8 +32,9 @@ jobs:
 
       - name: Build Release server
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DREDDISH_BUILD_DOCS=OFF
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
           cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
 
       - name: Run equal-workload benchmark
         env:
@@ -48,21 +47,19 @@ jobs:
           PIPELINE: 16
           DURATION_SECONDS: 30
           TRIALS: 5
+          INCLUDE_MEMCACHED: 1
+          REQUIRE_MEMCACHED: 1
         run: bash benchmarks/run_local.sh
 
-      - name: Update published benchmark summary
+      - name: Run profiles
         env:
-          RESULTS_DIR: ${{ github.workspace }}/benchmarks/results/github-actions
-        run: bash benchmarks/publish_results.sh
-
-      - name: Commit updated summary
-        run: |
-          if git diff --quiet -- benchmarks/benchmarks.md README.md; then
-            echo "Benchmark summary did not change."
-            exit 0
-          fi
-          git config user.name "Amit Verma"
-          git config user.email "35371348+amitverma-cf@users.noreply.github.com"
-          git add benchmarks/benchmarks.md README.md
-          git commit -m "Bench: Update GitHub Actions benchmark summary"
-          git push
+          RESULT_DIR: ${{ github.workspace }}/benchmarks/results/github-profile
+        run: bash benchmarks/profile.sh
+      - name: Measure WAL modes separately
+        run: python3 benchmarks/network_profile.py build/output/reddish --output benchmarks/results/github-wal --duration 5 --trials 3
+      - name: Preserve raw results and profiles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reddish-benchmarks-${{ github.sha }}
+          path: benchmarks/results/
