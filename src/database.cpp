@@ -1234,6 +1234,7 @@ void Database::open_wal(const std::filesystem::path &path, WalSync sync)
     catch (...)
     {
         replaying_ = false;
+        clear_keyspace();
         throw;
     }
     replaying_ = false;

@@ -132,3 +132,36 @@ TEST_CASE("a WAL has one writer at a time")
     first.set("k", "v");
     first.flush_wal();
 }
+
+TEST_CASE("failed WAL replay clears partial state and permits a clean retry")
+{
+    LogFile log;
+    LogFile clean;
+    std::uintmax_t valid = 0;
+    {
+        Database db;
+        db.open_wal(log.path, WalSync::always);
+        db.set("string", "value");
+        REQUIRE(db.hash_set_text("hash", "field", std::string(70000, 'h')));
+        REQUIRE(db.expire("hash", 60));
+        valid = std::filesystem::file_size(log.path);
+        db.set("corrupt", "record");
+    }
+    {
+        std::fstream out(log.path, std::ios::binary | std::ios::in | std::ios::out);
+        out.seekp(static_cast<std::streamoff>(valid + 8));
+        out.put('\x7f');
+        REQUIRE(out.good());
+    }
+    Database db;
+    REQUIRE_THROWS_AS(db.open_wal(log.path), Error);
+    CHECK(db.key_count() == 0);
+    CHECK_FALSE(db.maintenance_needed());
+    CHECK_FALSE(*db.get("string"));
+    CHECK_FALSE(*db.hash_get("hash", "field"));
+    CHECK(db.stats().wal_bytes == 0);
+    REQUIRE_NOTHROW(db.open_wal(clean.path, WalSync::always));
+    db.set("retry", "works");
+    db.flush_wal();
+    CHECK(**db.get("retry") == "works");
+}
