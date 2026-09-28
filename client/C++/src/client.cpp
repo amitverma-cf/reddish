@@ -42,6 +42,17 @@ std::expected<std::string, std::string> Client::execute(
         {
             const char type = response[position];
             std::int64_t length = 0;
+            if (type == ':')
+            {
+                const auto first = response.data() + position + 1;
+                const auto last = response.data() + end;
+                const auto [ptr, ec] = std::from_chars(first, last, length);
+                if (ec != std::errc{} || ptr != last)
+                {
+                    close();
+                    return std::unexpected("Invalid RESP integer");
+                }
+            }
             if (type == '$' || type == '*')
             {
                 const auto first = response.data() + position + 1;
@@ -63,6 +74,11 @@ std::expected<std::string, std::string> Client::execute(
             if (type == '$' && length >= 0)
             {
                 next += static_cast<std::size_t>(length) + 2;
+                if (next > limit)
+                {
+                    close();
+                    return std::unexpected("RESP reply too large");
+                }
                 incomplete = response.size() < next;
                 if (!incomplete && response.compare(next - 2, 2, "\r\n") != 0)
                 {
