@@ -418,35 +418,33 @@ void Database::set(std::string_view key, std::string_view val)
 {
     if (val.size() > 64 * 1024 * 1024) throw Error{ErrorCode::request_too_large};
     Node *node = find_writable(key);
-    log(WalOp::set, {key, val});
-    if (node == nullptr)
+    if (node == nullptr || node_type(*node) != NodeType::string ||
+        node_body_capacity(*node) < val.size() ||
+        (node_body_capacity(*node) > SlabPool::largest_class &&
+         val.size() < node_body_capacity(*node) / 4))
     {
-        node = insert_node(key, NodeType::string, static_cast<std::uint32_t>(val.size()));
-    }
-    else if (node_type(*node) != NodeType::string)
-    {
-        // Type change: dropping the node also releases a promoted hash table.
-        erase_node(node);
-        node = insert_node(key, NodeType::string, static_cast<std::uint32_t>(val.size()));
-    }
-    else if (node_body_capacity(*node) < val.size())
-    {
-        node = grow_node(node, static_cast<std::uint32_t>(val.size()));
-    }
-    else if (node_body_capacity(*node) > SlabPool::largest_class &&
-             val.size() < node_body_capacity(*node) / 4)
-    {
-        // Preserve even a view into the old value while releasing its large block.
-        const std::string saved(val);
-        node = grow_node(node, static_cast<std::uint32_t>(saved.size()));
-        if (!saved.empty()) std::memcpy(node_body(*node), saved.data(), saved.size());
-        node->count = static_cast<std::uint32_t>(saved.size());
-        clear_expiry(*node);
+        // Prepare all throwing storage work before logging. Keep the old node
+        // alive until both its replacement and the WAL append have succeeded;
+        // key/value views may refer to that node, including promoted hash data.
+        if (node == nullptr) maybe_rehash();
+        auto cleanup = [this](Node *pending) { destroy(pending); };
+        std::unique_ptr<Node, decltype(cleanup)> pending(
+            create_node(key, NodeType::string, static_cast<std::uint32_t>(val.size())), cleanup);
+        if (!val.empty()) std::memcpy(node_body(*pending), val.data(), val.size());
+        pending->count = static_cast<std::uint32_t>(val.size());
+        log(WalOp::set, {key, val});
+        if (node) erase_node(node);
+        node = pending.release();
+        link(node);
+        touch(*node);
+        ++key_total_;
+        key_hint_.store(key_total_);
         ++sequence_;
         return;
     }
 
-    if (!val.empty()) std::memcpy(node_body(*node), val.data(), val.size());
+    log(WalOp::set, {key, val});
+    if (!val.empty()) std::memmove(node_body(*node), val.data(), val.size());
     node->count = static_cast<std::uint32_t>(val.size());
     touch(*node);
     clear_expiry(*node);
@@ -760,14 +758,14 @@ Result<std::optional<Value>> Database::list_pop(std::string_view key, bool front
     char *run = list_run(*node);
     Value result;
 
-    log(front ? WalOp::pop_left : WalOp::pop_right, {key});
+    // Materialize the returned value before logging or changing list offsets.
+    // Copying a large string can fail, in which case the command must not pop.
+    std::uint32_t removed = 0;
     if (front)
     {
         const char *element = run + body->head;
-        const auto stride = static_cast<std::uint32_t>(pack::stride(element));
+        removed = static_cast<std::uint32_t>(pack::stride(element));
         result = element_to_value(pack::decode(element));
-        body->head += stride;
-        body->used -= stride;
     }
     else
     {
@@ -775,9 +773,12 @@ Result<std::optional<Value>> Database::list_pop(std::string_view key, bool front
         const std::size_t payload = pack::decode_backlen(end);
         const std::size_t full = payload + pack::backlen_bytes(payload);
         result = element_to_value(pack::decode(end - full));
-        body->used -= static_cast<std::uint32_t>(full);
+        removed = static_cast<std::uint32_t>(full);
     }
 
+    log(front ? WalOp::pop_left : WalOp::pop_right, {key});
+    if (front) body->head += removed;
+    body->used -= removed;
     --node->count;
     ++sequence_;
     if (node->count == 0) erase_node(node);
@@ -787,9 +788,18 @@ Result<std::optional<Value>> Database::list_pop(std::string_view key, bool front
         const auto used = body->used;
         if (used) std::memmove(list_run(*node), list_run(*node) + body->head, used);
         body->head = 0;
-        (void)grow_node(node, static_cast<std::uint32_t>(sizeof(ListBody) + std::max(used, 32U)));
+        try
+        {
+            (void)grow_node(node,
+                            static_cast<std::uint32_t>(sizeof(ListBody) + std::max(used, 32U)));
+        }
+        catch (const std::bad_alloc &)
+        {
+            // Shrinking is optional. The pop is already logged and applied;
+            // retain the larger, valid block rather than report command failure.
+        }
     }
-    return result;
+    return std::optional<Value>{std::move(result)};
 }
 
 Result<std::optional<Value>> Database::pop_left(std::string_view key)

@@ -286,3 +286,14 @@ TEST_CASE("large overwritten values and drained lists release excess storage")
     REQUIRE(*remaining);
     CHECK(std::get<std::string>(**remaining) == "remaining");
 }
+
+TEST_CASE("SET accepts overlapping views of an existing string")
+{
+    Database db;
+    db.set("key", "abcdefghijklmnopqrstuvwxyz");
+    const auto view = db.value_view("key");
+    REQUIRE(view);
+    REQUIRE(*view);
+    db.set("key", (*view)->text.substr(3));
+    CHECK(**db.get("key") == "defghijklmnopqrstuvwxyz");
+}

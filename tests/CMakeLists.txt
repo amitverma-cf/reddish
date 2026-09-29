@@ -17,6 +17,10 @@ target_compile_definitions(reddish_tests PRIVATE REDDISH_EXECUTABLE="$<TARGET_FI
 
 add_test(NAME reddish_tests COMMAND reddish_tests)
 set_tests_properties(reddish_tests PROPERTIES TIMEOUT 120)
+add_executable(reddish_allocation_tests allocation_tests.cpp)
+target_link_libraries(reddish_allocation_tests PRIVATE reddish_core)
+add_test(NAME allocation_failures COMMAND reddish_allocation_tests)
+set_tests_properties(allocation_failures PROPERTIES TIMEOUT 60)
 find_package(Python3 3.9 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
     add_test(NAME process_integration COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/integration.py $<TARGET_FILE:reddish>)
