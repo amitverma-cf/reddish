@@ -33,7 +33,7 @@ head -n 1 "${result_files[0]}" >"$combined"; for file in "${result_files[@]}"; d
 head -n 1 "${memory_files[0]}" >"$memory"; for file in "${memory_files[@]}"; do tail -n +2 "$file" >>"$memory"; done
 
 summary=$(awk -F, 'NR>1 {k=$1 SUBSEP $2;n[k]++;ops[k]+=$4;p99[k]+=$7;if(!(k in lo)||$4<lo[k])lo[k]=$4;if(!(k in hi)||$4>hi[k])hi[k]=$4} END {for(k in n){split(k,a,SUBSEP);printf "%s,%s,%d,%.0f,%.0f,%.0f,%.3f\n",a[1],a[2],n[k],ops[k]/n[k],lo[k],hi[k],p99[k]/n[k]}}' "$combined" | sort)
-memory_summary=$(awk -F, 'NR>1 {k=$1 SUBSEP $2;n[k]++;idle[k]+=$4;rss[k]+=$5;delta[k]+=$6;bytes[k]+=$7} END {for(k in n){split(k,a,SUBSEP);printf "%s,%s,%d,%.0f,%.0f,%.0f,%.2f\n",a[1],a[2],n[k],idle[k]/n[k],rss[k]/n[k],delta[k]/n[k],bytes[k]/n[k]}}' "$memory" | sort)
+memory_summary=$(awk -F, 'NR>1 {k=$1 SUBSEP $2;n[k]++;offset=(NF==8);idle[k]+=$(4+offset);rss[k]+=$(5+offset);delta[k]+=$(6+offset);bytes[k]+=$(7+offset)} END {for(k in n){split(k,a,SUBSEP);printf "%s,%s,%d,%.0f,%.0f,%.0f,%.2f\n",a[1],a[2],n[k],idle[k]/n[k],rss[k]/n[k],delta[k]/n[k],bytes[k]/n[k]}}' "$memory" | sort)
 
 {
   echo '<!-- generated-results:start -->'; echo '## Published results'; echo

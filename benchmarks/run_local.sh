@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-RESULT_DIR=${RESULT_DIR:-"$ROOT_DIR/benchmarks/results/$(date +%Y%m%d-%H%M%S)"}
+RESULT_DIR=${RESULT_DIR:-"$ROOT_DIR/local/benchmarks/$(date +%Y%m%d-%H%M%S)"}
 REDDISH_BINARY=${REDDISH_BINARY:-"$ROOT_DIR/build/wsl-release/output/reddish"}
 KEYS=${KEYS:-100000}
 [[ $KEYS =~ ^[1-9][0-9]*$ && ${#KEYS} -le 9 ]] || { echo 'KEYS must be a positive decimal integer below one billion' >&2; exit 1; }
@@ -15,10 +15,24 @@ PIPELINE=${PIPELINE:-16}
 DURATION_SECONDS=${DURATION_SECONDS:-30}
 AUXILIARY_DURATION_SECONDS=${AUXILIARY_DURATION_SECONDS:-5}
 TRIALS=${TRIALS:-5}
+WARMUP_SECONDS=${WARMUP_SECONDS:-2}
+MEMORY_TRIALS=${MEMORY_TRIALS:-3}
+RUN_EXTENDED=${RUN_EXTENDED:-1}
+RUN_PERFORMANCE=${RUN_PERFORMANCE:-1}
+RUN_MEMORY=${RUN_MEMORY:-1}
+for setting in VALUE_BYTES THREADS CLIENTS PIPELINE DURATION_SECONDS AUXILIARY_DURATION_SECONDS TRIALS MEMORY_TRIALS; do
+  value=${!setting}
+  [[ $value =~ ^[1-9][0-9]*$ && ${#value} -le 9 ]] || { echo "$setting must be a positive integer" >&2; exit 1; }
+done
+[[ $WARMUP_SECONDS =~ ^[0-9]+$ ]] || { echo 'Invalid WARMUP_SECONDS' >&2; exit 1; }
+for setting in RUN_EXTENDED RUN_PERFORMANCE RUN_MEMORY; do
+  [[ ${!setting} == 0 || ${!setting} == 1 ]] || { echo "$setting must be 0 or 1" >&2; exit 1; }
+done
+[[ ! -e "$RESULT_DIR/results.csv" ]] || { echo "Refusing to overwrite $RESULT_DIR" >&2; exit 1; }
 
 mkdir -p "$RESULT_DIR/temp"
 printf 'server,workload,trial,ops_per_sec,avg_latency_ms,p50_latency_ms,p99_latency_ms,p999_latency_ms\n' >"$RESULT_DIR/results.csv"
-printf 'server,scenario,key_count,idle_rss_kib,rss_kib,delta_rss_kib,bytes_per_key\n' >"$RESULT_DIR/memory.csv"
+printf 'server,scenario,trial,key_count,idle_rss_kib,rss_kib,delta_rss_kib,bytes_per_key\n' >"$RESULT_DIR/memory.csv"
 
 for program in memtier_benchmark redis-server valkey-server; do
   command -v "$program" >/dev/null || { echo "Missing $program" >&2; exit 1; }
@@ -45,12 +59,13 @@ test -x "$REDDISH_BINARY" || { echo "Missing reddish Release binary: $REDDISH_BI
   memtier_benchmark --version
   redis-server --version
   valkey-server --version
-  printf 'KEYS=%s VALUE_BYTES=%s THREADS=%s CLIENTS=%s PIPELINE=%s TRIALS=%s persistence=disabled\n' "$KEYS" "$VALUE_BYTES" "$THREADS" "$CLIENTS" "$PIPELINE" "$TRIALS"
+  printf 'KEYS=%s VALUE_BYTES=%s THREADS=%s CLIENTS=%s PIPELINE=%s TRIALS=%s DURATION_SECONDS=%s WARMUP_SECONDS=%s MEMORY_TRIALS=%s RUN_EXTENDED=%s persistence=disabled\n' "$KEYS" "$VALUE_BYTES" "$THREADS" "$CLIENTS" "$PIPELINE" "$TRIALS" "$DURATION_SECONDS" "$WARMUP_SECONDS" "$MEMORY_TRIALS" "$RUN_EXTENDED"
 } > "$RESULT_DIR/manifest.txt"
 printf 'server,workload,trial,cpu_seconds,operation_count,cpu_us_per_op\n' > "$RESULT_DIR/cpu.csv"
 cpu_ticks() { awk '{print $14 + $15}' "/proc/$server_pid/stat"; }
 ticks_per_second=$(getconf CLK_TCK)
 find "$ROOT_DIR/src" -type f \( -name '*.cpp' -o -name '*.hpp' \) -print0 | sort -z | xargs -0 sha256sum > "$RESULT_DIR/source-files.sha256"
+find "$ROOT_DIR/benchmarks" -maxdepth 1 -type f \( -name '*.py' -o -name '*.sh' \) -print0 | sort -z | xargs -0 sha256sum > "$RESULT_DIR/benchmark-files.sha256"
 
 server_pid=
 cleanup() {
@@ -59,30 +74,49 @@ cleanup() {
     wait "$server_pid" 2>/dev/null || true
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 start_server() {
   local server=$1 port=$2 log=$3
+  # Refuse a busy port rather than accidentally benchmarking another service.
+  python3 - "$port" <<'PY'
+import socket, sys
+with socket.socket() as probe:
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    probe.bind(('127.0.0.1', int(sys.argv[1])))
+PY
   case "$server" in
     reddish) "$REDDISH_BINARY" "$port" --max-keys "$((KEYS * 16))" --no-wal >"$log" 2>&1 & ;;
-    redis) redis-server --port "$port" --save '' --appendonly no >"$log" 2>&1 & ;;
-    valkey) valkey-server --port "$port" --save '' --appendonly no >"$log" 2>&1 & ;;
+    redis) redis-server --bind 127.0.0.1 --port "$port" --save '' --appendonly no >"$log" 2>&1 & ;;
+    valkey) valkey-server --bind 127.0.0.1 --port "$port" --save '' --appendonly no >"$log" 2>&1 & ;;
     memcached) memcached -l 127.0.0.1 -p "$port" -U 0 -m 256 >"$log" 2>&1 & ;;
   esac
   server_pid=$!
-  sleep 1
+  python3 "$ROOT_DIR/benchmarks/wait_server.py" "$server_pid" "$port" "$server"
   kill -0 "$server_pid" 2>/dev/null || { cat "$log" >&2; exit 1; }
 }
 
 stop_server() { cleanup; server_pid=; }
-rss_kib() { awk '/VmRSS:/ {print $2; exit}' "/proc/$server_pid/status"; }
+rss_kib() {
+  python3 - "$server_pid" <<'PY'
+import pathlib, statistics, sys, time
+path = pathlib.Path(f'/proc/{sys.argv[1]}/status')
+samples = []
+for _ in range(5):
+    samples.append(int(next(line.split()[1] for line in path.read_text().splitlines() if line.startswith('VmRSS:'))))
+    time.sleep(.05)
+print(statistics.median_low(samples))
+PY
+}
 
 record_memory() {
   local server=$1 scenario=$2 idle=$3 rss delta bytes actual
   actual=$(python3 "$ROOT_DIR/benchmarks/verify_preload.py" "$server" "$port" "$KEYS")
   rss=$(rss_kib); delta=$((rss - idle)); ((delta < 0)) && delta=0
   bytes=$(awk -v delta="$delta" -v keys="$KEYS" 'BEGIN {printf "%.2f", delta * 1024 / keys}')
-  printf '%s,%s,%s,%s,%s,%s,%s\n' "$server" "$scenario" "$KEYS" "$idle" "$rss" "$delta" "$bytes" >>"$RESULT_DIR/memory.csv"
+  printf '%s,%s,%s,%s,%s,%s,%s,%s\n' "$server" "$scenario" "$memory_trial" "$actual" "$idle" "$rss" "$delta" "$bytes" >>"$RESULT_DIR/memory.csv"
 }
 
 protocol_for() {
@@ -119,6 +153,7 @@ run_ratio() {
   local server=$1 port=$2 trial=$3 workload=$4 ratio=$5
   local raw="$RESULT_DIR/temp/$server-$workload-$trial.txt"
   local before; before=$(cpu_ticks)
+  echo "Timing $server $workload trial=$trial" >&2
   memtier_base "$server" "$port" --test-time "$DURATION_SECONDS" --key-pattern=S:S --ratio="$ratio" --json-out-file="$raw.json" --failed-keys-file="$raw.failed.csv" >"$raw" 2>"$raw.stderr"
   append_result "$server" "$workload" "$trial" "$raw"
   python3 "$ROOT_DIR/benchmarks/read_memtier.py" "$raw.json" --cpu "$server" "$workload" "$trial" "$before" "$(cpu_ticks)" "$ticks_per_second" >> "$RESULT_DIR/cpu.csv"
@@ -149,37 +184,54 @@ run_extended() {
 
 measure_memory() {
   local server=$1 port=$2 idle
-  start_server "$server" "$port" "$RESULT_DIR/temp/$server-memory-strings.log"; idle=$(rss_kib)
-  preload_strings "$server" "$port" "$RESULT_DIR/temp/$server-memory-strings-preload.txt"; record_memory "$server" strings "$idle"; stop_server
+  start_server "$server" "$port" "$RESULT_DIR/temp/$server-memory-strings-$memory_trial.log"; idle=$(rss_kib)
+  preload_strings "$server" "$port" "$RESULT_DIR/temp/$server-memory-strings-$memory_trial-preload.txt"; record_memory "$server" strings "$idle"; stop_server
   [[ $server == memcached ]] && return
-  start_server "$server" "$port" "$RESULT_DIR/temp/$server-memory-lists.log"; idle=$(rss_kib)
-  preload_command "$port" "$RESULT_DIR/temp/$server-memory-lists-preload.txt" --command='LPUSH list:__key__ __data__'; record_memory "$server" lists "$idle"; stop_server
-  start_server "$server" "$port" "$RESULT_DIR/temp/$server-memory-hashes.log"; idle=$(rss_kib)
-  preload_command "$port" "$RESULT_DIR/temp/$server-memory-hashes-preload.txt" --command='HSET hash:__key__ field __data__'; record_memory "$server" hashes "$idle"; stop_server
+  start_server "$server" "$port" "$RESULT_DIR/temp/$server-memory-lists-$memory_trial.log"; idle=$(rss_kib)
+  preload_command "$port" "$RESULT_DIR/temp/$server-memory-lists-$memory_trial-preload.txt" --command='LPUSH list:__key__ __data__'; record_memory "$server" lists "$idle"; stop_server
+  start_server "$server" "$port" "$RESULT_DIR/temp/$server-memory-hashes-$memory_trial.log"; idle=$(rss_kib)
+  preload_command "$port" "$RESULT_DIR/temp/$server-memory-hashes-$memory_trial-preload.txt" --command='HSET hash:__key__ field __data__'; record_memory "$server" hashes "$idle"; stop_server
 }
 
 SERVERS=('reddish:6380' 'redis:6381' 'valkey:6382')
 [[ $HAVE_MEMCACHED == 1 ]] && SERVERS+=('memcached:6383')
 
-for entry in "${SERVERS[@]}"; do
-  server=${entry%%:*}; port=${entry##*:}
-  start_server "$server" "$port" "$RESULT_DIR/temp/$server-performance.log"
-  preload_strings "$server" "$port" "$RESULT_DIR/temp/$server-strings-preload.txt"
-  if [[ $server != memcached ]]; then
-    preload_command "$port" "$RESULT_DIR/temp/$server-lists-preload.txt" --command='LPUSH len:__key__ __data__'
-    preload_command "$port" "$RESULT_DIR/temp/$server-hashes-preload.txt" --command='HSET hash:__key__ field __data__'
-  fi
-  for trial in $(seq 1 "$TRIALS"); do
+if [[ $RUN_PERFORMANCE == 1 ]]; then
+ for trial in $(seq 1 "$TRIALS"); do
+  # Rotate server order to distribute host drift; each trial starts fresh.
+  for offset in "${!SERVERS[@]}"; do
+    entry=${SERVERS[$(((trial - 1 + offset) % ${#SERVERS[@]}))]}
+    server=${entry%%:*}; port=${entry##*:}
+    start_server "$server" "$port" "$RESULT_DIR/temp/$server-performance-$trial.log"
+    preload_strings "$server" "$port" "$RESULT_DIR/temp/$server-strings-preload-$trial.txt"
+    python3 "$ROOT_DIR/benchmarks/verify_preload.py" "$server" "$port" "$KEYS" >/dev/null
+    if ((WARMUP_SECONDS > 0)); then
+      memtier_base "$server" "$port" --test-time "$WARMUP_SECONDS" --key-pattern=S:S --ratio=1:1 >"$RESULT_DIR/temp/$server-warmup-$trial.txt" 2>&1
+    fi
     run_ratio "$server" "$port" "$trial" reads 0:1
     run_ratio "$server" "$port" "$trial" writes 1:0
     if [[ $server != memcached ]]; then
       run_ratio "$server" "$port" "$trial" mixed 1:1
-      run_extended "$server" "$port" "$trial"
+      if [[ $RUN_EXTENDED == 1 ]]; then
+        preload_command "$port" "$RESULT_DIR/temp/$server-lists-preload-$trial.txt" --command='LPUSH len:__key__ __data__'
+        preload_command "$port" "$RESULT_DIR/temp/$server-hashes-preload-$trial.txt" --command='HSET hash:__key__ field __data__'
+        python3 "$ROOT_DIR/benchmarks/verify_preload.py" "$server" "$port" "$((KEYS * 3))" >/dev/null
+        run_extended "$server" "$port" "$trial"
+      fi
     fi
+    stop_server
   done
-  stop_server
-  measure_memory "$server" "$port"
-done
+ done
+fi
+if [[ $RUN_MEMORY == 1 ]]; then
+ for memory_trial in $(seq 1 "$MEMORY_TRIALS"); do
+  for entry in "${SERVERS[@]}"; do
+    server=${entry%%:*}; port=${entry##*:}
+    echo "Memory $server trial=$memory_trial" >&2
+    measure_memory "$server" "$port"
+  done
+ done
+fi
 
 {
   echo 'server,workload,samples,average_ops_per_sec,average_p99_latency_ms,min_ops_per_sec,max_ops_per_sec,stddev_ops_per_sec'
@@ -187,3 +239,4 @@ done
 } >"$RESULT_DIR/summary.csv"
 echo "Results: $RESULT_DIR/summary.csv"
 echo "Memory: $RESULT_DIR/memory.csv"
+python3 "$ROOT_DIR/benchmarks/summarize.py" "$RESULT_DIR"
