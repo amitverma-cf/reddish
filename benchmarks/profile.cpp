@@ -5,6 +5,12 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#if __has_include(<valgrind/callgrind.h>)
+#include <valgrind/callgrind.h>
+#else
+#define CALLGRIND_START_INSTRUMENTATION
+#define CALLGRIND_STOP_INSTRUMENTATION
+#endif
 using namespace reddish;
 int main(int argc, char **argv)
 {
@@ -27,6 +33,7 @@ int main(int argc, char **argv)
     if (shape == "queue") (void)db.push_right_text("q", "x");
     std::string output;
     std::uint64_t checksum = 0;
+    CALLGRIND_START_INSTRUMENTATION;
     const auto started = std::chrono::steady_clock::now();
     const auto cpu = std::clock();
     for (std::size_t i = 0; i < iterations; ++i)
@@ -50,6 +57,7 @@ int main(int argc, char **argv)
     const double seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     const double cpu_seconds = double(std::clock() - cpu) / CLOCKS_PER_SEC;
+    CALLGRIND_STOP_INSTRUMENTATION;
     auto stats = db.stats();
     const auto operations = shape == "queue" ? iterations * 2 : iterations;
     std::cout << "shape,operations,wall_seconds,cpu_seconds,cpu_us_per_op,ops_per_sec,active_bytes,"
