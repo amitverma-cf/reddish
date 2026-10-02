@@ -227,7 +227,9 @@ void Server::process_client(int client_id)
             break;
         }
 
-        if (classify_command(command.name).is_write) has_write = true;
+        const auto classification = classify_command(command.name);
+        command.classified_id = classification.id;
+        if (classification.is_write) has_write = true;
         client.input_offset += command.bytes_consumed;
         ++count;
     }
@@ -310,7 +312,8 @@ void Server::execute_batch(ClientInfo &client, std::size_t count, bool has_write
         try
         {
             for (std::size_t index = 0; index < count; ++index)
-                execute_into(client.batch[index], database, stats, client.output_buffer);
+                execute_into(client.batch[index], database, stats, client.output_buffer,
+                             client.batch[index].classified_id);
         }
         catch (...)
         {
@@ -320,7 +323,9 @@ void Server::execute_batch(ClientInfo &client, std::size_t count, bool has_write
         // Commit the group before process_client can send even the first reply.
         if (has_write) database.end_wal_batch();
     }
-    if (has_write) maintenance_wake.notify_all();
+    // TTL maintenance polls on its existing deadline. Only capacity pressure
+    // needs an immediate wake-up; notifying on every write causes idle-thread
+    // scheduling and futex work even when there are no TTLs or excess keys.
     // Maintenance does the evictions. Wait at a batch boundary under pressure
     // so an endlessly writing client cannot make the excess keyspace unbounded.
     if (database.over_capacity())

@@ -509,7 +509,13 @@ CommandInfo classify_command(std::string_view name) noexcept
 void execute_into(const Command &command, Database &database, const ServerStats &stats,
                   std::string &output)
 {
-    switch (classify_command(command.name).id)
+    execute_into(command, database, stats, output, classify_command(command.name).id);
+}
+
+void execute_into(const Command &command, Database &database, const ServerStats &stats,
+                  std::string &output, CommandId classified_id)
+{
+    switch (classified_id)
     {
     case CommandId::ping:
         execute_ping(command, database, stats, output);

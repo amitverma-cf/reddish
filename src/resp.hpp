@@ -82,11 +82,16 @@ class ArgumentList
     std::vector<std::string_view> overflow_;
 };
 
+enum class CommandId : std::uint8_t;
+
 struct Command
 {
     std::string_view name;
     ArgumentList arguments;
     std::size_t bytes_consumed = 0;
+    // Cached by the event loop after parsing. Direct callers use the overload
+    // that classifies the current name, so editing a Command cannot stale it.
+    CommandId classified_id{};
 };
 
 struct ServerStats
@@ -140,6 +145,8 @@ Result<void> parse_command_into(std::string_view input, Command &command);
 // Appends the RESP encoding of one command's reply to `output`.
 void execute_into(const Command &command, Database &database, const ServerStats &stats,
                   std::string &output);
+void execute_into(const Command &command, Database &database, const ServerStats &stats,
+                  std::string &output, CommandId classified_id);
 
 // Single pass reply writers. Every one of them appends directly to the output
 // buffer, so a reply is never built twice.
