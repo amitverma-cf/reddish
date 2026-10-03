@@ -19,7 +19,7 @@ bool should_stop()
 }
 constexpr const char *usage = "Usage: reddish [port] [--max-keys <count>] [--wal-path <path>] "
                               "[--wal-sync everysec|always|none] [--no-wal]\n";
-} // namespace
+}
 int main(int argc, char *argv[])
 {
     try

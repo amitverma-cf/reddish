@@ -18,7 +18,7 @@ struct LogFile
         std::filesystem::remove(path, ec);
     }
 };
-} // namespace
+}
 TEST_CASE("WAL replays every mutation including expiry and LRU eviction")
 {
     LogFile log;
@@ -54,7 +54,7 @@ TEST_CASE("WAL replays every mutation including expiry and LRU eviction")
     REQUIRE(large);
     REQUIRE(*large);
     CHECK(std::get<std::string>(**large).size() == 70000);
-    CHECK_FALSE(*restored.get("counter")); // oldest at the explicit eviction
+    CHECK_FALSE(*restored.get("counter"));
     restored.flush_wal();
 }
 TEST_CASE("WAL TTLs survive restart without being extended")

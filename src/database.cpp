@@ -17,8 +17,6 @@ namespace
 {
 std::uint32_t hash_key(std::string_view key) noexcept
 {
-    // FNV-1a over the key bytes. Keys are short and the table masks the result,
-    // so a byte-at-a-time multiply keeps insertion cheap.
     std::uint64_t hash = 0xCBF29CE484222325ULL;
     for (const char character : key)
     {
@@ -35,16 +33,13 @@ std::int64_t current_unix_ms()
         .count();
 }
 
-} // namespace
+}
 
 Database::Database(std::size_t max_keys)
     : buckets_(initial_bucket_count, nullptr), max_keys_(max_keys == 0 ? 1 : max_keys)
 {
 }
 
-// Promoted hash tables live on the general heap rather than in the slab, and
-// oversized nodes are individual allocations rather than part of a slab chunk, so
-// both have to be released explicitly before the pool drops its chunks.
 Database::~Database()
 {
     release_nodes();
@@ -66,8 +61,6 @@ void Database::release_nodes() noexcept
     }
 }
 
-// --- clock -----------------------------------------------------------------
-
 std::int64_t Database::steady_ms() noexcept
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -79,8 +72,6 @@ std::int64_t Database::now_ms() const
 {
     return steady_ms();
 }
-
-// --- keyspace --------------------------------------------------------------
 
 Database::Node *Database::find_node(std::string_view key) noexcept
 {
@@ -100,8 +91,6 @@ Database::Node *Database::find_active(std::string_view key)
     Node *node = find_node(key);
     if (node == nullptr) return nullptr;
 
-    // Keys without a TTL skip the side table entirely, so the read path pays
-    // nothing when the keyspace is entirely persistent.
     if ((node_flags(*node) & flag_has_ttl) != 0)
     {
         const auto entry = expiries_.find(node);
@@ -148,8 +137,6 @@ Database::Node *Database::create_node(std::string_view key, NodeType type,
     }
     else
     {
-        // Oversized nodes are allocated at their exact size and carry a size word
-        // between the key and the payload.
         requested += sizeof(std::uint64_t);
     }
     if (requested > std::numeric_limits<std::uint32_t>::max()) throw std::bad_alloc();
@@ -240,8 +227,6 @@ Database::Node *Database::insert_node(std::string_view key, NodeType type,
 {
     maybe_rehash();
 
-    // Hash for the bucket; recompute on rehash/erase rather than storing a
-    // padded hash word in every node. Exact LRU then fits in a 32-byte header.
     const std::uint32_t hash = hash_key(key);
     const std::size_t index = hash & (buckets_.size() - 1);
     Node *node = create_node(key, type, body_capacity);
@@ -304,8 +289,6 @@ Database::Node *Database::grow_node(Node *node, std::uint32_t new_body_capacity)
         expiries_.insert(std::move(entry));
     }
 
-    // Node addresses are not stable across a grow, so any pointer the caller
-    // holds must be refreshed from the returned value.
     const std::size_t index =
         hash_key({node_key(*fresh), node_key_length(*fresh)}) & (buckets_.size() - 1);
     if (buckets_[index] == node)
@@ -364,8 +347,6 @@ void Database::rehash(std::size_t new_bucket_count)
     buckets_.swap(fresh);
 }
 
-// --- eviction --------------------------------------------------------------
-
 void Database::unlink_lru(Node &node) noexcept
 {
     if (node.lru_previous) node.lru_previous->lru_next = node.lru_next;
@@ -412,8 +393,6 @@ std::size_t Database::evict_to(std::size_t target, std::size_t limit)
     return evicted;
 }
 
-// --- strings and integers --------------------------------------------------
-
 void Database::set(std::string_view key, std::string_view val)
 {
     if (val.size() > 64 * 1024 * 1024) throw Error{ErrorCode::request_too_large};
@@ -423,9 +402,6 @@ void Database::set(std::string_view key, std::string_view val)
         (node_body_capacity(*node) > SlabPool::largest_class &&
          val.size() < node_body_capacity(*node) / 4))
     {
-        // Prepare all throwing storage work before logging. Keep the old node
-        // alive until both its replacement and the WAL append have succeeded;
-        // key/value views may refer to that node, including promoted hash data.
         if (node == nullptr) maybe_rehash();
         auto cleanup = [this](Node *pending) { destroy(pending); };
         std::unique_ptr<Node, decltype(cleanup)> pending(
@@ -593,8 +569,6 @@ Result<std::int64_t> Database::increment(std::string_view key)
     return current + 1;
 }
 
-// --- packed lists ----------------------------------------------------------
-
 std::size_t Database::element_size(const ElementInput &value, bool with_backlen) noexcept
 {
     if (value.is_integer)
@@ -644,10 +618,6 @@ Database::Node *Database::list_reserve(Node *node, std::uint32_t extra_front,
     const bool back_fits = body->head + body->used + extra_back <= capacity;
     if (front_fits && back_fits) return node;
 
-    // Reallocate with room on both sides and re-centre the live run, which keeps
-    // pushes amortised O(1) instead of shifting the run every time. The run is
-    // placed anywhere in the feasible window [lowest, highest]; centring keeps
-    // room available at both ends for alternating pushes.
     const std::uint32_t required = body->used + extra_front + extra_back;
     const std::uint32_t new_capacity =
         required <= capacity ? capacity : grown_capacity(required, capacity);
@@ -657,8 +627,6 @@ Database::Node *Database::list_reserve(Node *node, std::uint32_t extra_front,
         node = grow_node(node, static_cast<std::uint32_t>(sizeof(ListBody) + new_capacity));
     body = list_body(*node);
 
-    // new_capacity >= required guarantees lowest <= highest, so neither clamp can
-    // push the run outside the region that the upcoming write needs.
     const std::uint32_t lowest = extra_front;
     const std::uint32_t highest = new_capacity - used - extra_back;
     std::uint32_t new_head = (new_capacity - used) / 2;
@@ -689,9 +657,6 @@ Result<std::int64_t> Database::list_push(std::string_view key, const ElementInpu
          value.is_integer ? std::string_view(integer) : value.text});
     if (node == nullptr)
     {
-        // Size the first block to hold exactly this element. Pushing onto an empty
-        // list never needs head room, whichever end it targets, so the smallest
-        // possible block is always enough and no growth is needed.
         node = insert_node(key, NodeType::list,
                            static_cast<std::uint32_t>(sizeof(ListBody) + encoded));
         list_body(*node)->head = 0;
@@ -758,8 +723,6 @@ Result<std::optional<Value>> Database::list_pop(std::string_view key, bool front
     char *run = list_run(*node);
     Value result;
 
-    // Materialize the returned value before logging or changing list offsets.
-    // Copying a large string can fail, in which case the command must not pop.
     std::uint32_t removed = 0;
     if (front)
     {
@@ -795,8 +758,6 @@ Result<std::optional<Value>> Database::list_pop(std::string_view key, bool front
         }
         catch (const std::bad_alloc &)
         {
-            // Shrinking is optional. The pop is already logged and applied;
-            // retain the larger, valid block rather than report command failure.
         }
     }
     return std::optional<Value>{std::move(result)};
@@ -819,8 +780,6 @@ Result<std::int64_t> Database::list_length(std::string_view key)
     if (node_type(*node) != NodeType::list) return std::unexpected(Error{ErrorCode::wrong_type});
     return static_cast<std::int64_t>(node->count);
 }
-
-// --- packed and promoted hashes --------------------------------------------
 
 ValueView Database::view_of(const Value &value) noexcept
 {
@@ -1116,8 +1075,6 @@ Result<std::int64_t> Database::hash_length(std::string_view key)
     return static_cast<std::int64_t>(hash_count(*node));
 }
 
-// --- expiry ----------------------------------------------------------------
-
 bool Database::expire(std::string_view key, std::int64_t seconds)
 {
     Node *node = find_writable(key);
@@ -1177,8 +1134,6 @@ void Database::remove_expired(std::size_t limit)
     std::unique_lock guard(mutex_);
     remove_expired_locked(limit);
 }
-
-// --- keyspace operations ---------------------------------------------------
 
 bool Database::del(std::string_view key)
 {
@@ -1327,4 +1282,4 @@ void Database::replay(WalOp op, const std::vector<std::string_view> &a)
     }
 }
 
-} // namespace reddish
+}

@@ -10,7 +10,7 @@ void SlabPool::add_chunk(std::size_t index)
     const std::size_t block = class_sizes[index];
 
     std::size_t bytes = chunk_bytes;
-    // Large classes need enough blocks per chunk to amortise the mapping.
+
     while (bytes < block * 16)
         bytes *= 2;
 
@@ -74,4 +74,4 @@ void SlabPool::release() noexcept
     reserved_ = 0;
 }
 
-} // namespace reddish
+}

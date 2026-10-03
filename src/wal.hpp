@@ -36,9 +36,6 @@ enum class WalOp : unsigned char
     integer_set = 10
 };
 
-// Framed, checksummed redo records. Append precedes mutation. everysec may lose
-// recent acknowledgements on a crash. Always-sync batches commit before replies;
-// standalone appends sync immediately.
 class Wal
 {
   public:
@@ -74,4 +71,4 @@ class Wal
     bool dirty_ = false;
     bool defer_sync_ = false;
 };
-} // namespace reddish
+}

@@ -1,4 +1,4 @@
-"""Process-level WAL, capacity, protocol and optional Redis differential checks."""
+
 import argparse
 import os
 from pathlib import Path
@@ -94,7 +94,7 @@ class Integration(unittest.TestCase):
         server.sock.sendall(request('GET', 'big') * 100)
         try: self.assertEqual(server.stream.read(1), b'')
         except ConnectionResetError: pass
-        # One oversized client must not take down the server.
+
         with socket.create_connection(('127.0.0.1', server.port), timeout=5) as sock:
             sock.sendall(request('PING')); self.assertEqual(sock.recv(100), b'+PONG\r\n')
     def test_durable_wal_crash_recovery_and_offline_ttl(self):

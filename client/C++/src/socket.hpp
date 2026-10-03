@@ -29,5 +29,4 @@ class Socket
   private:
     std::intptr_t handle_ = -1;
 };
-
-} // namespace reddish::client
+}

@@ -127,7 +127,7 @@ std::string get_loaded_value(std::uint16_t port)
     throw std::runtime_error("reddish did not accept a connection");
 }
 
-} // namespace
+}
 
 TEST_CASE("main replays WAL before accepting TCP commands")
 {

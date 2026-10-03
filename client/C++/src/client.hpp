@@ -47,5 +47,4 @@ class Client
     SocketSystem socket_system_;
     Socket socket_;
 };
-
-} // namespace reddish::client
+}

@@ -11,8 +11,6 @@ namespace reddish
 namespace slab_detail
 {
 
-// Dense below 128 bytes, where keyspace entries live, then geometric so that
-// larger collection payloads are still served from a slab.
 inline constexpr std::size_t class_sizes[] = {
     8,   16,  24,  32,   40,   48,   56,   64,   72,   80,   88,   96,
     104, 112, 120, 128,  160,  192,  224,  256,  320,  384,  448,  512,
@@ -24,7 +22,6 @@ inline constexpr std::size_t dense_limit = 128;
 inline constexpr std::size_t dense_classes = dense_limit / 8;
 inline constexpr std::size_t largest_class = class_sizes[class_count - 1];
 
-// Index of the smallest class that can hold `size`.
 inline std::size_t class_index(std::size_t size) noexcept
 {
     if (size <= dense_limit) return (size <= 8) ? 0 : (size + 7) / 8 - 1;
@@ -40,18 +37,8 @@ inline std::size_t class_index(std::size_t size) noexcept
     return low;
 }
 
-} // namespace slab_detail
+}
 
-// Size-classed slab allocator used for every keyspace node.
-//
-// A general purpose allocator adds a 16-byte chunk header (plus alignment and
-// arena metadata) to every allocation. Keyspace entries are small and numerous,
-// so that header is pure overhead. Blocks handed out by this pool carry no
-// header at all: the requested size is rounded up to a size class and the
-// caller returns that same requested size when it releases the block.
-//
-// The pool is deliberately not thread safe. Database serializes every access to
-// it under its own exclusive lock.
 class SlabPool
 {
   public:
@@ -67,7 +54,6 @@ class SlabPool
     void *allocate(std::size_t size);
     void deallocate(void *block, std::size_t size) noexcept;
 
-    // Bytes obtained from the system, including blocks still on a free list.
     std::size_t reserved_bytes() const noexcept
     {
         return reserved_;
@@ -102,5 +88,4 @@ class SlabPool
     std::vector<Chunk> chunks_;
     std::size_t reserved_ = 0;
 };
-
-} // namespace reddish
+}

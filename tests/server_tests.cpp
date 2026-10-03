@@ -122,7 +122,7 @@ std::uint16_t find_open_port()
     throw std::runtime_error("no test port available");
 }
 
-} // namespace
+}
 
 TEST_CASE("server accepts TCP commands and cleanly stops")
 {
@@ -266,8 +266,6 @@ TEST_CASE("server still replies to a client that half closes its connection")
     ClientSocket client;
     REQUIRE(client.connect(port));
 
-    // Send the whole pipeline and then close our write side immediately. The
-    // replies are still owed to us, so the server must flush them before closing.
     client.send_all("*3\r\n$3\r\nSET\r\n$4\r\nname\r\n$7\r\nreddish\r\n"
                     "*2\r\n$3\r\nGET\r\n$4\r\nname\r\n");
     client.shutdown_write();

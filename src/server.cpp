@@ -21,7 +21,7 @@ bool is_incomplete_resp_error(ErrorCode code)
            code == ErrorCode::incomplete_bulk_string_data;
 }
 
-} // namespace
+}
 
 Server::Server(ServerConfig config)
     : config(std::move(config)), database(this->config.max_keys), running(false), next_client_id(0)
@@ -52,7 +52,6 @@ void Server::start(bool (*should_stop)())
 
     std::cout << "Server listening on port " << config.port << '\n';
 
-    // Expiry and capacity eviction run in bounded maintenance slices.
     std::jthread maintenance([this](std::stop_token token) { maintenance_loop(token); });
 
     while (running && !should_stop())
@@ -143,7 +142,7 @@ void Server::read_client(int client_id)
     auto entry = clients.find(client_id);
     if (entry == clients.end()) return;
     ClientInfo &client = entry->second;
-    // Once the peer has shut down its write side there is nothing left to read.
+
     if (client.half_closed) return;
 
     char chunk[read_chunk_size];
@@ -177,9 +176,7 @@ void Server::read_client(int client_id)
 
         if (received == 0)
         {
-            // The peer shut down its write side. Stop reading, mark the connection
-            // to close once its output has drained, and fall through so that
-            // anything already buffered is still answered.
+
             client.half_closed = true;
             client.close_after_write = true;
             break;
@@ -198,8 +195,7 @@ void Server::process_client(int client_id)
     auto entry = clients.find(client_id);
     if (entry == clients.end()) return;
     ClientInfo &client = entry->second;
-    // Reply writers bound the pending string. Drop a partially sent prefix
-    // before appending so already-transmitted bytes do not consume that budget.
+
     if (client.output_offset != 0)
     {
         client.output_buffer.erase(0, client.output_offset);
@@ -220,7 +216,7 @@ void Server::process_client(int client_id)
         const auto parsed = parse_command_into(input, command);
         if (!parsed)
         {
-            // A partial command just means the rest is still in flight.
+
             if (is_incomplete_resp_error(parsed.error().code())) break;
             protocol_error = true;
             protocol_code = parsed.error().code();
@@ -234,9 +230,6 @@ void Server::process_client(int client_id)
         ++count;
     }
 
-    // Run everything that parsed cleanly before reporting a later protocol error,
-    // and before compacting the input buffer: the parsed arguments are views into
-    // it, so the buffer must not move until every one of them has been executed.
     if (count != 0)
     {
         try
@@ -305,8 +298,7 @@ void Server::execute_batch(ClientInfo &client, std::size_t count, bool has_write
                             output_buffer_disconnects};
 
     {
-        // There is one command thread and one maintenance writer. Exclusive
-        // ownership also makes lazy expiry and recency mutation unambiguous.
+
         std::unique_lock guard(database.mutex());
         if (has_write) database.begin_wal_batch();
         try
@@ -320,14 +312,10 @@ void Server::execute_batch(ClientInfo &client, std::size_t count, bool has_write
             if (has_write) database.end_wal_batch();
             throw;
         }
-        // Commit the group before process_client can send even the first reply.
+
         if (has_write) database.end_wal_batch();
     }
-    // TTL maintenance polls on its existing deadline. Only capacity pressure
-    // needs an immediate wake-up; notifying on every write causes idle-thread
-    // scheduling and futex work even when there are no TTLs or excess keys.
-    // Maintenance does the evictions. Wait at a batch boundary under pressure
-    // so an endlessly writing client cannot make the excess keyspace unbounded.
+
     if (database.over_capacity())
     {
         maintenance_wake.notify_all();
@@ -437,4 +425,4 @@ void Server::maintenance_loop(std::stop_token token)
     }
 }
 
-} // namespace reddish
+}

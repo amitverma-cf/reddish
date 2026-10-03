@@ -19,13 +19,6 @@ struct SocketEvent
     bool error = false;
 };
 
-// Readiness notification.
-//
-// On Linux this is a real epoll instance: descriptors are registered once and the
-// kernel keeps the interest set, so a wait costs one syscall and no per-call
-// bookkeeping. On Windows, where there is no epoll, the same persistent
-// registration is kept in a WSAPoll array that is only touched when the set
-// changes.
 class SocketSystem
 {
   public:
@@ -35,16 +28,11 @@ class SocketSystem
     SocketSystem(const SocketSystem &) = delete;
     SocketSystem &operator=(const SocketSystem &) = delete;
 
-    // Registers `socket`, or updates its interest when it is already registered.
-    // Read interest can be dropped for a peer that closed its write side, so a
-    // pending reply cannot make the loop spin on an always-readable descriptor.
     void watch(Socket &socket, int token, bool readable, bool writable);
     void unwatch(Socket &socket) noexcept;
 
-    // Waits for readiness. The returned span stays valid until the next wait().
     std::span<const SocketEvent> wait(int timeout_ms);
 
-    // Reserved token reported for the listening socket.
     static constexpr int listener_token = -1;
 
   private:
@@ -81,5 +69,4 @@ class Socket
 
     std::intptr_t handle_;
 };
-
-} // namespace reddish
+}

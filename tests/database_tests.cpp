@@ -124,12 +124,10 @@ TEST_CASE("database expires keys and evicts least recently used keys")
 
 TEST_CASE("LRU survives keyspace rehashing")
 {
-    // Enough keys to force several rehashes of the bucket array.
     Database database(257);
     for (int index = 0; index < 257; ++index)
         database.set("key-" + std::to_string(index), "value");
 
-    // Touch the oldest key, then evict exactly the least recent remaining key.
     REQUIRE(database.get("key-0"));
     database.set("overflow", "value");
     REQUIRE(database.evict_to(257, 128) == 1);
@@ -256,7 +254,7 @@ TEST_CASE("expiry rescheduling keeps one heap entry and follows grown nodes")
     REQUIRE(db.push_right_text("list", std::string(10000, 'x')));
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));
     CHECK(db.list_length("list") == 0);
-    // A read observes expiry without changing the keyspace.
+
     CHECK(db.key_count() == 3);
     db.remove_expired(1);
     CHECK(db.key_count() == 2);

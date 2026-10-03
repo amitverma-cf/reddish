@@ -53,5 +53,4 @@ class Error final : public std::exception
   private:
     ErrorCode code_;
 };
-
-} // namespace reddish
+}

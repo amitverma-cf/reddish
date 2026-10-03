@@ -43,11 +43,8 @@ std::intptr_t portable_handle(NativeSocket handle)
     return static_cast<std::intptr_t>(handle);
 }
 
-// Upper bound on the number of readiness records a single wait can return.
 constexpr std::size_t max_events_per_wait = 256;
-} // namespace
-
-// --- platform event state --------------------------------------------------
+}
 
 struct SocketSystem::Platform
 {
@@ -176,7 +173,7 @@ std::span<const SocketEvent> SocketSystem::wait(int timeout_ms)
         translated.token = static_cast<int>(static_cast<std::uint32_t>(event.data.u64));
         translated.readable = (event.events & EPOLLIN) != 0;
         translated.writable = (event.events & EPOLLOUT) != 0;
-        // EPOLLRDHUP lets a half-closed peer be noticed without a read.
+
         translated.error = (event.events & EPOLLERR) != 0;
         translated.readable = translated.readable || (event.events & EPOLLHUP) != 0;
         platform_->ready.push_back(translated);
@@ -214,8 +211,6 @@ std::span<const SocketEvent> SocketSystem::wait(int timeout_ms)
 
     return platform_->ready;
 }
-
-// --- socket ----------------------------------------------------------------
 
 Socket::Socket() : handle_(portable_handle(invalid_socket)) {}
 
@@ -309,8 +304,6 @@ void Socket::set_nonblocking()
 
 void Socket::set_nodelay()
 {
-    // Matches the Redis and Valkey defaults. Without it the kernel delays small
-    // replies and each pipeline batch can stall on a delayed acknowledgement.
     const int option = 1;
 #ifdef _WIN32
     setsockopt(native_handle(handle_), IPPROTO_TCP, TCP_NODELAY,
@@ -359,4 +352,4 @@ void Socket::close()
     handle_ = portable_handle(invalid_socket);
 }
 
-} // namespace reddish
+}

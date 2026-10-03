@@ -13,12 +13,6 @@
 namespace reddish
 {
 
-// Argument list with inline storage for the common case.
-//
-// The previous implementation reserved a std::vector per parsed command, which
-// meant one heap allocation and one free for every request. Every command this
-// server implements takes at most three arguments, so keeping eight slots inline
-// removes that allocation entirely and only the rare wide command spills.
 class ArgumentList
 {
   public:
@@ -89,8 +83,7 @@ struct Command
     std::string_view name;
     ArgumentList arguments;
     std::size_t bytes_consumed = 0;
-    // Cached by the event loop after parsing. Direct callers use the overload
-    // that classifies the current name, so editing a Command cannot stale it.
+
     CommandId classified_id{};
 };
 
@@ -127,34 +120,25 @@ enum class CommandId : std::uint8_t
 struct CommandInfo
 {
     CommandId id = CommandId::unknown;
-    // True for commands that can modify values. All batches take exclusive
-    // ownership because reads also update exact LRU state.
+
     bool is_write = false;
 };
 
-// Case-insensitive command lookup by a folded name tag: one switch instead of a
-// chain of string comparisons.
 CommandInfo classify_command(std::string_view name) noexcept;
 
 Result<Command> parse_command(std::string_view input);
 
-// Fills a caller-owned Command so that a pipelined batch can reuse its argument
-// storage instead of allocating per command.
 Result<void> parse_command_into(std::string_view input, Command &command);
 
-// Appends the RESP encoding of one command's reply to `output`.
 void execute_into(const Command &command, Database &database, const ServerStats &stats,
                   std::string &output);
 void execute_into(const Command &command, Database &database, const ServerStats &stats,
                   std::string &output, CommandId classified_id);
 
-// Single pass reply writers. Every one of them appends directly to the output
-// buffer, so a reply is never built twice.
 void append_simple_string(std::string &output, std::string_view text);
 void append_error(std::string &output, std::string_view text);
 void append_integer(std::string &output, std::int64_t value);
 void append_bulk_string(std::string &output, std::string_view text);
 void append_null(std::string &output);
 void append_array_header(std::string &output, std::int64_t count);
-
-} // namespace reddish
+}

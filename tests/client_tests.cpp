@@ -67,7 +67,7 @@ std::expected<std::string, std::string> reply_from_peer(const std::vector<std::s
     if (failure) std::rethrow_exception(failure);
     return result;
 }
-} // namespace
+}
 
 TEST_CASE("C++ client assembles fragmented nested RESP replies")
 {

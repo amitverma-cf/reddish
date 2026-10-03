@@ -6,8 +6,7 @@
 
 namespace
 {
-// Only the test's calling thread fails allocations. WAL maintenance threads and
-// validation code continue normally; production allocators need no test hooks.
+
 thread_local std::ptrdiff_t fail_after = -1;
 void check(bool condition, const char *message)
 {
@@ -166,7 +165,7 @@ void test_pop(bool front, bool single, int mode)
     }
     check(finished, "pop allocation sweep did not reach success");
 }
-} // namespace
+}
 
 void *operator new(std::size_t size)
 {

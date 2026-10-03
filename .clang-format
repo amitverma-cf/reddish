@@ -4,3 +4,4 @@ ColumnLimit: 100
 BreakBeforeBraces: Allman
 AllowShortFunctionsOnASingleLine: Empty
 AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+FixNamespaceComments: false

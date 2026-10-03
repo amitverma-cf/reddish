@@ -197,4 +197,4 @@ void Client::close()
     socket_.close();
 }
 
-} // namespace reddish::client
+}

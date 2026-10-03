@@ -71,4 +71,4 @@ const char *Error::what() const noexcept
     return error_message(code_).data();
 }
 
-} // namespace reddish
+}

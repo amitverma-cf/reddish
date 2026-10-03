@@ -6,7 +6,6 @@ RESULT_DIR=${RESULT_DIR:-"$ROOT_DIR/local/benchmarks/$(date +%Y%m%d-%H%M%S)"}
 REDDISH_BINARY=${REDDISH_BINARY:-"$ROOT_DIR/build/wsl-release/output/reddish"}
 KEYS=${KEYS:-100000}
 [[ $KEYS =~ ^[1-9][0-9]*$ && ${#KEYS} -le 9 ]] || { echo 'KEYS must be a positive decimal integer below one billion' >&2; exit 1; }
-# Explicit memtier minima must be positive: exactly KEYS keys are 1..KEYS.
 KEY_MAX=$KEYS
 VALUE_BYTES=${VALUE_BYTES:-32}
 THREADS=${THREADS:-1}
@@ -38,7 +37,6 @@ for program in memtier_benchmark redis-server valkey-server; do
   command -v "$program" >/dev/null || { echo "Missing $program" >&2; exit 1; }
 done
 
-# Local runs never launch memcached unless explicitly opted in. GitHub requires it.
 HAVE_MEMCACHED=0
 if [[ ${INCLUDE_MEMCACHED:-0} == 1 ]]; then
   command -v memcached >/dev/null && HAVE_MEMCACHED=1
@@ -80,7 +78,6 @@ trap 'exit 143' TERM
 
 start_server() {
   local server=$1 port=$2 log=$3
-  # Refuse a busy port rather than accidentally benchmarking another service.
   python3 - "$port" <<'PY'
 import socket, sys
 with socket.socket() as probe:
@@ -136,11 +133,6 @@ preload_strings() {
 
 preload_command() {
   local port=$1 raw=$2; shift 2
-  # Sequential keys matter twice over: the extended workloads address keys with
-  # --command-key-pattern=S, so a random preload leaves about 37% of their lookups
-  # pointing at keys that were never created, and the memory measurement divides
-  # by KEYS while a random preload only creates about 63% of them. The key-pattern
-  # flag trails the --command it applies to, which is how memtier expects it.
   memtier_benchmark --server=127.0.0.1 --port="$port" --protocol=redis --threads=1 --clients=1 --requests="$KEYS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-minimum=1 --key-maximum="$KEY_MAX" --hide-histogram "$@" --command-key-pattern=S >"$raw" 2>"$raw.stderr"
 }
 
@@ -198,7 +190,6 @@ SERVERS=('reddish:6380' 'redis:6381' 'valkey:6382')
 
 if [[ $RUN_PERFORMANCE == 1 ]]; then
  for trial in $(seq 1 "$TRIALS"); do
-  # Rotate server order to distribute host drift; each trial starts fresh.
   for offset in "${!SERVERS[@]}"; do
     entry=${SERVERS[$(((trial - 1 + offset) % ${#SERVERS[@]}))]}
     server=${entry%%:*}; port=${entry##*:}

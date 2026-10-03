@@ -98,12 +98,11 @@ std::size_t recover(const std::filesystem::path &path, const Wal::Replay &replay
         valid += 8 + size;
     }
     input.close();
-    // A crashed append can leave an incomplete final frame. Never silently
-    // discard a fully present frame with a bad checksum or malformed payload.
+
     if (torn) std::filesystem::resize_file(path, valid);
     return valid;
 }
-} // namespace
+}
 
 Wal::Wal(const std::filesystem::path &path, WalSync sync, const Replay &replay) : sync_(sync)
 {
@@ -116,8 +115,7 @@ Wal::Wal(const std::filesystem::path &path, WalSync sync, const Replay &replay) 
     try
     {
 #ifdef _WIN32
-        // Lock a sentinel byte beyond the log, so the recovery reader can use
-        // its own handle while another writer cannot open this WAL.
+
         OVERLAPPED lock{};
         lock.Offset = 0xffffffff;
         lock.OffsetHigh = 0x7fffffff;
@@ -274,4 +272,4 @@ void Wal::end_batch()
     defer_sync_ = false;
     if (sync_ == WalSync::always) flush_locked();
 }
-} // namespace reddish
+}

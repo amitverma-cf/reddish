@@ -40,7 +40,7 @@ void close_native_socket(
 #endif
 }
 
-} // namespace
+}
 
 TEST_CASE("socket accepts reads writes moves and closes")
 {
@@ -131,8 +131,6 @@ TEST_CASE("socket accepts reads writes moves and closes")
     REQUIRE(received == 4);
     CHECK(std::string(buffer, sizeof(buffer)) == "ping");
 
-    // Enabling writability interest must produce a writable event for a socket
-    // that has room in its send buffer.
     socket_system.watch(accepted, accepted_token, true, true);
     bool saw_writable = false;
     for (int attempt = 0; attempt < 20 && !saw_writable; ++attempt)
@@ -148,7 +146,6 @@ TEST_CASE("socket accepts reads writes moves and closes")
     CHECK(client_succeeded);
     CHECK(client_reply == "pong");
 
-    // Removing the registration must stop events for it.
     socket_system.unwatch(accepted);
     for (const auto &event : socket_system.wait(0))
         CHECK(event.token != accepted_token);

@@ -113,4 +113,4 @@ void Socket::close()
 #endif
     handle_ = -1;
 }
-} // namespace reddish::client
+}

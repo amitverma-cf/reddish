@@ -27,10 +27,6 @@ struct ServerConfig
     WalSync wal_sync = WalSync::everysec;
 };
 
-// The event loop runs bounded command batches. Maintenance owns physical expiry
-// and exact LRU capacity eviction; WAL owns its periodic flush/sync thread.
-// Every database batch has exclusive ownership. Capacity pressure waits for the
-// maintenance thread at a batch boundary; there is no inline eviction.
 class Server
 {
   public:
@@ -49,7 +45,7 @@ class Server
         std::size_t input_offset = 0;
         std::string output_buffer;
         std::size_t output_offset = 0;
-        // Reused parse slots: a pipelined batch never allocates argument storage.
+
         std::vector<Command> batch;
         bool watching_write = false;
         bool close_after_write = false;
@@ -78,8 +74,7 @@ class Server
     static constexpr std::size_t batch_limit = 1024;
     static constexpr std::size_t compact_buffer_threshold = 64 * 1024;
     static constexpr int event_wait_timeout_ms = 50;
-    // Keys handled per lock acquisition by the background threads. Keeping these
-    // small bounds how long the maintenance thread can hold the lock.
+
     static constexpr std::size_t expiry_slice = 128;
     static constexpr std::size_t eviction_slice = 256;
 
@@ -94,5 +89,4 @@ class Server
     void maintenance_loop(std::stop_token token);
     static void compact_buffer(std::string &buffer, std::size_t &offset);
 };
-
-} // namespace reddish
+}

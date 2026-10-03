@@ -9,8 +9,8 @@ namespace reddish::pack
 namespace
 {
 
-constexpr std::uint8_t integer_tag = 0x80;     // 0b10______
-constexpr std::uint8_t long_string_tag = 0xC0; // 0b11______
+constexpr std::uint8_t integer_tag = 0x80;
+constexpr std::uint8_t long_string_tag = 0xC0;
 
 std::uint32_t load_u32(const char *p) noexcept
 {
@@ -40,7 +40,6 @@ void store_u64(char *p, std::uint64_t value) noexcept
     std::memcpy(p, &value, sizeof(value));
 }
 
-// Header + payload size of the element at `p`.
 std::size_t header_and_payload(const char *p) noexcept
 {
     const auto tag = static_cast<std::uint8_t>(p[0]);
@@ -49,7 +48,7 @@ std::size_t header_and_payload(const char *p) noexcept
     return max_string_header + load_u32(p + 1);
 }
 
-} // namespace
+}
 
 std::size_t backlen_bytes(std::size_t size) noexcept
 {
@@ -88,9 +87,6 @@ std::size_t body_size(std::int64_t value) noexcept
 namespace
 {
 
-// Writes the trailing backlen describing a header+payload size of `size`.
-// The first byte holds the most significant group and has its continuation bit
-// clear; every later group has it set, so the field decodes backwards.
 void encode_backlen(char *out, std::size_t size) noexcept
 {
     if (size <= 127)
@@ -126,7 +122,7 @@ void encode_backlen(char *out, std::size_t size) noexcept
     out[4] = static_cast<char>((size & 0x7F) | 0x80);
 }
 
-} // namespace
+}
 
 char *encode(char *out, std::string_view text) noexcept
 {
@@ -227,4 +223,4 @@ Element decode(const char *p) noexcept
                    std::string_view{p + max_string_header, static_cast<std::size_t>(length)}, 0};
 }
 
-} // namespace reddish::pack
+}
