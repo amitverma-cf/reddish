@@ -40,7 +40,7 @@ void check_parse_error(std::string_view input, ErrorCode code)
     CHECK(result.error().code() == code);
 }
 
-} // namespace
+}
 
 TEST_CASE("RESP parser reads a command and leaves pipelined bytes")
 {
@@ -61,12 +61,10 @@ TEST_CASE("RESP parser reuses an existing command slot without reallocating")
     REQUIRE(parse_command_into("*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\nb\r\n", command));
     CHECK(command.arguments.size() == 2);
 
-    // Reusing the slot must drop the previous arguments rather than append.
     REQUIRE(parse_command_into("*1\r\n$4\r\nPING\r\n", command));
     CHECK(command.name == "PING");
     CHECK(command.arguments.empty());
 
-    // More arguments than the inline capacity must still work.
     std::string wide = "*10\r\n$5\r\nLPUSH\r\n$1\r\nk\r\n";
     for (int index = 0; index < 8; ++index)
         wide += "$1\r\n" + std::to_string(index) + "\r\n";
@@ -90,6 +88,33 @@ TEST_CASE("RESP parser rejects malformed input")
     check_parse_error("*1\r\n$4\r\nPI", ErrorCode::incomplete_bulk_string_data);
     check_parse_error("*1\r\n$4\r\nPING", ErrorCode::incomplete_bulk_string_data);
     check_parse_error("*1\r\n$4\r\nPINGxx", ErrorCode::missing_bulk_string_terminator);
+}
+
+TEST_CASE("RESP parsing handles every frame prefix and decimal header boundary")
+{
+    Command parsed;
+    for (const std::size_t length : {0, 9, 10, 32, 99, 100, 1000})
+    {
+        std::string value(length, 'x');
+        if (length >= 4) value.replace(0, 4, std::string("\0\r\nx", 4));
+        const std::string frame =
+            "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$" + std::to_string(length) + "\r\n" + value + "\r\n";
+        for (std::size_t prefix = 0; prefix < frame.size(); ++prefix)
+            REQUIRE_FALSE(parse_command_into(std::string_view(frame).substr(0, prefix), parsed));
+        const std::string pipeline = frame + "*1\r\n$4\r\nPING\r\n";
+        REQUIRE(parse_command_into(pipeline, parsed));
+        CHECK(parsed.name == "SET");
+        REQUIRE(parsed.arguments.size() == 2);
+        CHECK(parsed.arguments[1] == value);
+        CHECK(parsed.bytes_consumed == frame.size());
+    }
+    REQUIRE(parse_command_into("*0002\r\n$003\r\nGET\r\n$0001\r\nk\r\n", parsed));
+    CHECK(parsed.name == "GET");
+    CHECK(parsed.arguments[0] == "k");
+    check_parse_error("*999999999999999999999999999999\r\n", ErrorCode::invalid_resp_array_length);
+    check_parse_error("*1\r\n$999999999999999999999999999999\r\n",
+                      ErrorCode::invalid_bulk_string_length);
+    check_parse_error("*1\r\n$12x\r\n", ErrorCode::invalid_bulk_string_length);
 }
 
 TEST_CASE("RESP encoder emits every response type")
@@ -122,6 +147,19 @@ TEST_CASE("RESP encoder emits every response type")
     CHECK(output == "*2\r\n:1\r\n$1\r\nx\r\n");
 }
 
+TEST_CASE("bulk encoding preserves prefixes and aliased binary payloads across growth")
+{
+    std::string output(1000, 'x');
+    output[50] = '\0';
+    const std::string original = output;
+    const std::string payload = original.substr(40, 100);
+    append_bulk_string(output, std::string_view(output).substr(40, 100));
+    CHECK(output == original + "$100\r\n" + payload + "\r\n");
+    const std::string saved = output;
+    CHECK_THROWS_AS(append_bulk_string(output, std::string(1024 * 1024, 'y')), Error);
+    CHECK(output == saved);
+}
+
 TEST_CASE("command dispatch ignores name casing and rejects unknown commands")
 {
     CHECK(classify_command("GET").id == CommandId::get);
@@ -131,8 +169,22 @@ TEST_CASE("command dispatch ignores name casing and rejects unknown commands")
     CHECK(classify_command("SET").is_write == true);
     CHECK(classify_command("DEL").is_write == true);
     CHECK(classify_command("GET").is_write == false);
+    for (const auto &[name, id] :
+         {std::pair{"GET", CommandId::get}, std::pair{"SET", CommandId::set},
+          std::pair{"DEL", CommandId::del}, std::pair{"TTL", CommandId::ttl}})
+    {
+        for (int mask = 0; mask < 8; ++mask)
+        {
+            std::string mixed = name;
+            for (int index = 0; index < 3; ++index)
+                if (mask & (1 << index)) mixed[index] += 'a' - 'A';
+            CHECK(classify_command(mixed).id == id);
+            CHECK(classify_command(mixed).is_write ==
+                  (id == CommandId::set || id == CommandId::del));
+        }
+    }
     CHECK(classify_command("WHATEVER").id == CommandId::unknown);
-    // A name with an embedded NUL must not alias the shorter command.
+
     CHECK(classify_command(std::string_view{"get\0\0\0\0\0", 8}).id == CommandId::unknown);
 
     Database database;
@@ -170,8 +222,6 @@ TEST_CASE("command execution handles lists and hashes")
     CHECK(run(database, command("HSET", {"user", "name"})) ==
           "-ERR wrong number of arguments for 'hset' command\r\n");
 
-    // A hash field stored as an integer still answers with a bulk string, exactly
-    // like Redis does, rather than leaking the internal integer encoding.
     CHECK(run(database, command("HSET", {"counters", "hits", "7"})) == ":1\r\n");
     CHECK(run(database, command("HGET", {"counters", "hits"})) == "$1\r\n7\r\n");
 }

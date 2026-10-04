@@ -3,6 +3,7 @@
 
 #include <charconv>
 #include <cstring>
+#include <functional>
 #include <limits>
 
 namespace reddish
@@ -11,9 +12,6 @@ namespace reddish
 namespace
 {
 
-// Folds up to eight name bytes to lower case and mixes in the name length, so a
-// single switch on the result identifies the command. The length is part of the
-// tag, which keeps a name containing embedded NULs from aliasing a shorter one.
 constexpr std::uint64_t tag_of(const char *text) noexcept
 {
     std::uint64_t tag = 0;
@@ -43,7 +41,6 @@ void require_reply_space(const std::string &output, std::size_t bytes)
         throw Error{ErrorCode::request_too_large};
 }
 
-// Integer formatting without a heap allocation or a stream.
 void append_decimal(std::int64_t value, std::string &output)
 {
     char buffer[24];
@@ -61,11 +58,26 @@ void append_bulk_view(std::string &output, std::string_view text)
 {
     if (text.size() > max_reply_bytes - 32) throw Error{ErrorCode::request_too_large};
     require_reply_space(output, text.size() + 32);
-    output.push_back('$');
-    append_decimal(static_cast<std::int64_t>(text.size()), output);
-    output.append("\r\n", 2);
-    if (!text.empty()) output.append(text);
-    output.append("\r\n", 2);
+    char header[32];
+    header[0] = '$';
+    auto [end, error] = std::to_chars(header + 1, header + sizeof(header) - 2, text.size());
+    *end++ = '\r';
+    *end++ = '\n';
+    const auto header_size = static_cast<std::size_t>(end - header);
+    const auto offset = output.size();
+    const auto size = offset + header_size + text.size() + 2;
+
+    output.resize_and_overwrite(size,
+                                [&](char *buffer, std::size_t) noexcept
+                                {
+                                    std::memcpy(buffer + offset, header, header_size);
+                                    if (!text.empty())
+                                        std::memcpy(buffer + offset + header_size, text.data(),
+                                                    text.size());
+                                    buffer[size - 2] = '\r';
+                                    buffer[size - 1] = '\n';
+                                    return size;
+                                });
 }
 
 void append_info(Database &database, const ServerStats &stats, bool memory_only,
@@ -117,8 +129,6 @@ void append_info(Database &database, const ServerStats &stats, bool memory_only,
 
 void execute_ping(const Command &, Database &, const ServerStats &, std::string &output)
 {
-    // The hottest command in the suite is a constant, so it writes the reply
-    // bytes directly instead of building and re-encoding a response object.
     output.append("+PONG\r\n", 7);
 }
 
@@ -133,7 +143,8 @@ void execute_set(const Command &command, Database &database, const ServerStats &
     }
 
     database.set(arguments[0], arguments[1]);
-    append_simple_string(output, "OK");
+    require_reply_space(output, 5);
+    output.append("+OK\r\n", 5);
 }
 
 void execute_get(const Command &command, Database &database, const ServerStats &,
@@ -160,8 +171,6 @@ void execute_get(const Command &command, Database &database, const ServerStats &
 
     if ((*value)->kind == ValueView::Kind::integer)
     {
-        // Redis always answers GET with a bulk string, including for values that
-        // are stored as integers.
         append_bulk_string(output, std::to_string((*value)->integer));
         return;
     }
@@ -298,7 +307,6 @@ void execute_hash_get(const Command &command, Database &database, const ServerSt
         return;
     }
 
-    // The packed representation is read in place, so a hash read copies nothing.
     const auto value = database.hash_field(arguments[0], arguments[1]);
     if (!value)
     {
@@ -414,9 +422,7 @@ void execute_del(const Command &command, Database &database, const ServerStats &
     append_integer(output, deleted);
 }
 
-} // namespace
-
-// --- reply writers ---------------------------------------------------------
+}
 
 void append_simple_string(std::string &output, std::string_view text)
 {
@@ -444,6 +450,13 @@ void append_integer(std::string &output, std::int64_t value)
 
 void append_bulk_string(std::string &output, std::string_view text)
 {
+    const std::less<const char *> less;
+    if (!less(text.data(), output.data()) && !less(output.data() + output.size(), text.data()))
+    {
+        const std::string saved(text);
+        append_bulk_view(output, saved);
+        return;
+    }
     append_bulk_view(output, text);
 }
 
@@ -461,10 +474,28 @@ void append_array_header(std::string &output, std::int64_t count)
     output.append("\r\n", 2);
 }
 
-// --- dispatch --------------------------------------------------------------
-
 CommandInfo classify_command(std::string_view name) noexcept
 {
+    if (name.size() == 3)
+    {
+        const auto folded =
+            (static_cast<std::uint32_t>(static_cast<unsigned char>(name[0])) | 0x20U) |
+            ((static_cast<std::uint32_t>(static_cast<unsigned char>(name[1])) | 0x20U) << 8) |
+            ((static_cast<std::uint32_t>(static_cast<unsigned char>(name[2])) | 0x20U) << 16);
+        switch (folded)
+        {
+        case static_cast<std::uint32_t>(tag_of("get")):
+            return {CommandId::get, false};
+        case static_cast<std::uint32_t>(tag_of("set")):
+            return {CommandId::set, true};
+        case static_cast<std::uint32_t>(tag_of("del")):
+            return {CommandId::del, true};
+        case static_cast<std::uint32_t>(tag_of("ttl")):
+            return {CommandId::ttl, false};
+        default:
+            return {CommandId::unknown, true};
+        }
+    }
     switch (tag_of(name))
     {
     case tag_of("ping"):
@@ -590,8 +621,6 @@ void execute_into(const Command &command, Database &database, const ServerStats 
                              std::string{command.name} + "'");
 }
 
-// --- parsing ---------------------------------------------------------------
-
 namespace
 {
 
@@ -604,9 +633,7 @@ template <typename T> Result<T> parse_number(std::string_view input, ErrorCode e
     return value;
 }
 
-} // namespace
-
-Result<void> parse_command_into(std::string_view input, Command &command)
+Result<void> parse_command_slow(std::string_view input, Command &command)
 {
     command.arguments.clear();
     command.name = {};
@@ -663,6 +690,72 @@ Result<void> parse_command_into(std::string_view input, Command &command)
     return {};
 }
 
+inline bool read_length(const char *&cursor, const char *end, std::size_t &length) noexcept
+{
+    const auto remaining = end - cursor;
+    if (remaining < 3) return false;
+    const auto first = static_cast<unsigned char>(*cursor) - static_cast<unsigned>('0');
+    if (first > 9) return false;
+    if (cursor[1] == '\r' && cursor[2] == '\n')
+    {
+        length = first;
+        cursor += 3;
+        return true;
+    }
+    if (remaining < 4) return false;
+    const auto second = static_cast<unsigned char>(cursor[1]) - static_cast<unsigned>('0');
+    if (second > 9) return false;
+    if (cursor[2] == '\r' && cursor[3] == '\n')
+    {
+        length = first * 10 + second;
+        cursor += 4;
+        return true;
+    }
+    const char *position = cursor;
+    std::size_t value = 0;
+    while (position != end)
+    {
+        const auto digit = static_cast<unsigned char>(*position) - static_cast<unsigned>('0');
+        if (digit > 9) break;
+        if (value > (std::numeric_limits<std::size_t>::max() - digit) / 10) return false;
+        value = value * 10 + digit;
+        ++position;
+    }
+    if (end - position < 2 || position[0] != '\r' || position[1] != '\n') return false;
+    length = value;
+    cursor = position + 2;
+    return true;
+}
+}
+
+Result<void> parse_command_into(std::string_view input, Command &command)
+{
+    if (input.size() < 4 || input[0] != '*') return parse_command_slow(input, command);
+    command.arguments.clear();
+    command.name = {};
+    command.bytes_consumed = 0;
+    const char *cursor = input.data() + 1;
+    const char *end = input.data() + input.size();
+    std::size_t count;
+    if (!read_length(cursor, end, count) || count == 0) return parse_command_slow(input, command);
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        if (cursor == end || *cursor++ != '$') return parse_command_slow(input, command);
+        std::size_t length;
+        if (!read_length(cursor, end, length) || end - cursor < 2 ||
+            length > static_cast<std::size_t>(end - cursor - 2))
+            return parse_command_slow(input, command);
+        if (cursor[length] != '\r' || cursor[length + 1] != '\n')
+            return parse_command_slow(input, command);
+        const std::string_view value(cursor, length);
+        if (index == 0) command.name = value;
+        else command.arguments.push_back(value);
+        cursor += length + 2;
+    }
+    command.bytes_consumed = static_cast<std::size_t>(cursor - input.data());
+    return {};
+}
+
 Result<Command> parse_command(std::string_view input)
 {
     Command command;
@@ -671,4 +764,4 @@ Result<Command> parse_command(std::string_view input)
     return command;
 }
 
-} // namespace reddish
+}
