@@ -9,6 +9,24 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(REDDISH_ENABLE_COVERAGE "Enable LLVM source coverage instrumentation" OFF)
 option(REDDISH_BUILD_PROFILES "Build database profiling workloads" OFF)
+option(REDDISH_ENABLE_IPO "Enable supported interprocedural optimization in optimized builds" ON)
+
+if(REDDISH_ENABLE_IPO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT REDDISH_IPO_SUPPORTED OUTPUT REDDISH_IPO_ERROR LANGUAGES CXX)
+    if(NOT REDDISH_IPO_SUPPORTED)
+        message(STATUS "Interprocedural optimization unavailable: ${REDDISH_IPO_ERROR}")
+    endif()
+endif()
+
+function(reddish_optimize target)
+    if(REDDISH_ENABLE_IPO AND REDDISH_IPO_SUPPORTED)
+        set_target_properties(${target} PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE
+            INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE
+        )
+    endif()
+endfunction()
 
 if(MSVC)
     add_compile_options(/FS)
@@ -45,10 +63,13 @@ endif()
 
 add_executable(reddish src/main.cpp)
 target_link_libraries(reddish PRIVATE reddish_core)
+reddish_optimize(reddish_core)
+reddish_optimize(reddish)
 
 if(REDDISH_BUILD_PROFILES)
     add_executable(reddish_profile benchmarks/profile.cpp)
     target_link_libraries(reddish_profile PRIVATE reddish_core)
+    reddish_optimize(reddish_profile)
 endif()
 
 if(REDDISH_ENABLE_COVERAGE)
