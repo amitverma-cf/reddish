@@ -171,12 +171,12 @@ void Server::read_client(int client_id)
                 request_write(client_id);
                 return;
             }
+            if (static_cast<std::size_t>(received) < sizeof(chunk)) break;
             continue;
         }
 
         if (received == 0)
         {
-
             client.half_closed = true;
             client.close_after_write = true;
             break;
@@ -216,7 +216,6 @@ void Server::process_client(int client_id)
         const auto parsed = parse_command_into(input, command);
         if (!parsed)
         {
-
             if (is_incomplete_resp_error(parsed.error().code())) break;
             protocol_error = true;
             protocol_code = parsed.error().code();
@@ -298,7 +297,6 @@ void Server::execute_batch(ClientInfo &client, std::size_t count, bool has_write
                             output_buffer_disconnects};
 
     {
-
         std::unique_lock guard(database.mutex());
         if (has_write) database.begin_wal_batch();
         try
