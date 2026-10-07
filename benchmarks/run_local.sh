@@ -19,11 +19,17 @@ MEMORY_TRIALS=${MEMORY_TRIALS:-3}
 RUN_EXTENDED=${RUN_EXTENDED:-1}
 RUN_PERFORMANCE=${RUN_PERFORMANCE:-1}
 RUN_MEMORY=${RUN_MEMORY:-1}
+REQUESTS_PER_CLIENT=${REQUESTS_PER_CLIENT:-0}
+SERVER_COMMAND=()
+CLIENT_COMMAND=()
+[[ -z ${SERVER_CPU:-} ]] || SERVER_COMMAND=(taskset -c "$SERVER_CPU")
+[[ -z ${CLIENT_CPUS:-} ]] || CLIENT_COMMAND=(taskset -c "$CLIENT_CPUS")
 for setting in VALUE_BYTES THREADS CLIENTS PIPELINE DURATION_SECONDS AUXILIARY_DURATION_SECONDS TRIALS MEMORY_TRIALS; do
   value=${!setting}
   [[ $value =~ ^[1-9][0-9]*$ && ${#value} -le 9 ]] || { echo "$setting must be a positive integer" >&2; exit 1; }
 done
 [[ $WARMUP_SECONDS =~ ^[0-9]+$ ]] || { echo 'Invalid WARMUP_SECONDS' >&2; exit 1; }
+[[ $REQUESTS_PER_CLIENT =~ ^(0|[1-9][0-9]*)$ && ${#REQUESTS_PER_CLIENT} -le 9 ]] || { echo 'Invalid REQUESTS_PER_CLIENT' >&2; exit 1; }
 for setting in RUN_EXTENDED RUN_PERFORMANCE RUN_MEMORY; do
   [[ ${!setting} == 0 || ${!setting} == 1 ]] || { echo "$setting must be 0 or 1" >&2; exit 1; }
 done
@@ -57,6 +63,8 @@ test -x "$REDDISH_BINARY" || { echo "Missing reddish Release binary: $REDDISH_BI
   memtier_benchmark --version
   redis-server --version
   valkey-server --version
+  printf 'SERVER_CPU=%s CLIENT_CPUS=%s\n' "${SERVER_CPU:-unbound}" "${CLIENT_CPUS:-unbound}"
+  printf 'REQUESTS_PER_CLIENT=%s\n' "$REQUESTS_PER_CLIENT"
   printf 'KEYS=%s VALUE_BYTES=%s THREADS=%s CLIENTS=%s PIPELINE=%s TRIALS=%s DURATION_SECONDS=%s WARMUP_SECONDS=%s MEMORY_TRIALS=%s RUN_EXTENDED=%s persistence=disabled\n' "$KEYS" "$VALUE_BYTES" "$THREADS" "$CLIENTS" "$PIPELINE" "$TRIALS" "$DURATION_SECONDS" "$WARMUP_SECONDS" "$MEMORY_TRIALS" "$RUN_EXTENDED"
 } > "$RESULT_DIR/manifest.txt"
 printf 'server,workload,trial,cpu_seconds,operation_count,cpu_us_per_op\n' > "$RESULT_DIR/cpu.csv"
@@ -85,10 +93,10 @@ with socket.socket() as probe:
     probe.bind(('127.0.0.1', int(sys.argv[1])))
 PY
   case "$server" in
-    reddish) "$REDDISH_BINARY" "$port" --max-keys "$((KEYS * 16))" --no-wal >"$log" 2>&1 & ;;
-    redis) redis-server --bind 127.0.0.1 --port "$port" --save '' --appendonly no >"$log" 2>&1 & ;;
-    valkey) valkey-server --bind 127.0.0.1 --port "$port" --save '' --appendonly no >"$log" 2>&1 & ;;
-    memcached) memcached -l 127.0.0.1 -p "$port" -U 0 -m 256 >"$log" 2>&1 & ;;
+    reddish) "${SERVER_COMMAND[@]}" "$REDDISH_BINARY" "$port" --max-keys "$((KEYS * 16))" --no-wal >"$log" 2>&1 & ;;
+    redis) "${SERVER_COMMAND[@]}" redis-server --bind 127.0.0.1 --port "$port" --save '' --appendonly no >"$log" 2>&1 & ;;
+    valkey) "${SERVER_COMMAND[@]}" valkey-server --bind 127.0.0.1 --port "$port" --save '' --appendonly no >"$log" 2>&1 & ;;
+    memcached) "${SERVER_COMMAND[@]}" memcached -l 127.0.0.1 -p "$port" -U 0 -m 256 >"$log" 2>&1 & ;;
   esac
   server_pid=$!
   python3 "$ROOT_DIR/benchmarks/wait_server.py" "$server_pid" "$port" "$server"
@@ -123,31 +131,33 @@ protocol_for() {
 memtier_base() {
   local server=$1 port=$2
   shift 2
-  memtier_benchmark --server=127.0.0.1 --port="$port" --protocol="$(protocol_for "$server")" --threads="$THREADS" --clients="$CLIENTS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-minimum=1 --key-maximum="$KEY_MAX" --hide-histogram "$@"
+  "${CLIENT_COMMAND[@]}" memtier_benchmark --server=127.0.0.1 --port="$port" --protocol="$(protocol_for "$server")" --threads="$THREADS" --clients="$CLIENTS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-minimum=1 --key-maximum="$KEY_MAX" --hide-histogram "$@"
 }
 
 preload_strings() {
   local server=$1 port=$2 output=$3
-  memtier_benchmark --server=127.0.0.1 --port="$port" --protocol="$(protocol_for "$server")" --threads=1 --clients=1 --requests="$KEYS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-minimum=1 --key-maximum="$KEY_MAX" --key-pattern=S:S --ratio=1:0 --hide-histogram >"$output" 2>"$output.stderr"
+  "${CLIENT_COMMAND[@]}" memtier_benchmark --server=127.0.0.1 --port="$port" --protocol="$(protocol_for "$server")" --threads=1 --clients=1 --requests="$KEYS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-minimum=1 --key-maximum="$KEY_MAX" --key-pattern=S:S --ratio=1:0 --hide-histogram >"$output" 2>"$output.stderr"
 }
 
 preload_command() {
   local port=$1 raw=$2; shift 2
-  memtier_benchmark --server=127.0.0.1 --port="$port" --protocol=redis --threads=1 --clients=1 --requests="$KEYS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-minimum=1 --key-maximum="$KEY_MAX" --hide-histogram "$@" --command-key-pattern=S >"$raw" 2>"$raw.stderr"
+  "${CLIENT_COMMAND[@]}" memtier_benchmark --server=127.0.0.1 --port="$port" --protocol=redis --threads=1 --clients=1 --requests="$KEYS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-minimum=1 --key-maximum="$KEY_MAX" --hide-histogram "$@" --command-key-pattern=S >"$raw" 2>"$raw.stderr"
 }
 
 append_result() {
-  local server=$1 workload=$2 trial=$3 raw=$4
-  python3 "$ROOT_DIR/benchmarks/read_memtier.py" "$raw.json" "$server" "$workload" "$trial" >>"$RESULT_DIR/results.csv"
+  local server=$1 workload=$2 trial=$3 raw=$4 expected=${5:-0}
+  python3 "$ROOT_DIR/benchmarks/read_memtier.py" "$raw.json" "$server" "$workload" "$trial" "$expected" >>"$RESULT_DIR/results.csv"
 }
 
 run_ratio() {
   local server=$1 port=$2 trial=$3 workload=$4 ratio=$5
   local raw="$RESULT_DIR/temp/$server-$workload-$trial.txt"
+  local -a limit=(--test-time "$DURATION_SECONDS")
+  ((REQUESTS_PER_CLIENT == 0)) || limit=(--requests "$REQUESTS_PER_CLIENT")
   local before; before=$(cpu_ticks)
   echo "Timing $server $workload trial=$trial" >&2
-  memtier_base "$server" "$port" --test-time "$DURATION_SECONDS" --key-pattern=S:S --ratio="$ratio" --json-out-file="$raw.json" --failed-keys-file="$raw.failed.csv" >"$raw" 2>"$raw.stderr"
-  append_result "$server" "$workload" "$trial" "$raw"
+  memtier_base "$server" "$port" "${limit[@]}" --key-pattern=S:S --ratio="$ratio" --json-out-file="$raw.json" --failed-keys-file="$raw.failed.csv" >"$raw" 2>"$raw.stderr"
+  append_result "$server" "$workload" "$trial" "$raw" "$((REQUESTS_PER_CLIENT * THREADS * CLIENTS))"
   python3 "$ROOT_DIR/benchmarks/read_memtier.py" "$raw.json" --cpu "$server" "$workload" "$trial" "$before" "$(cpu_ticks)" "$ticks_per_second" >> "$RESULT_DIR/cpu.csv"
 }
 
