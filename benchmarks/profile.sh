@@ -3,6 +3,7 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"$ROOT_DIR/build/profile"}
 RESULT_DIR=${RESULT_DIR:-"$ROOT_DIR/local/benchmarks/profile-$(date +%Y%m%d-%H%M%S)"}
+[[ ! -e "$RESULT_DIR/manifest.txt" ]] || { echo "Refusing to overwrite $RESULT_DIR" >&2; exit 1; }
 mkdir -p "$RESULT_DIR"
 cmake -S "$ROOT_DIR" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF -DREDDISH_BUILD_PROFILES=ON
 cmake --build "$BUILD_DIR" --parallel "${BUILD_JOBS:-4}"

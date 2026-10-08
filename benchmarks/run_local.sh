@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 RESULT_DIR=${RESULT_DIR:-"$ROOT_DIR/local/benchmarks/$(date +%Y%m%d-%H%M%S)"}
-REDDISH_BINARY=${REDDISH_BINARY:-"$ROOT_DIR/build/wsl-release/output/reddish"}
+REDDISH_BINARY=${REDDISH_BINARY:-"$ROOT_DIR/build/output/reddish"}
 KEYS=${KEYS:-100000}
 [[ $KEYS =~ ^[1-9][0-9]*$ && ${#KEYS} -le 9 ]] || { echo 'KEYS must be a positive decimal integer below one billion' >&2; exit 1; }
 KEY_MAX=$KEYS
