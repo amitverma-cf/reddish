@@ -14,8 +14,7 @@ The project is a learning implementation. It is useful for exploring a single-th
 - Expiry: `EXPIRE`, `TTL`
 - LRU eviction when `--max-keys` is reached
 - Server and memory statistics: `INFO`, `INFO memory`
-- Periodic snapshots and a final snapshot during a clean shutdown
-- Optional loading from a snapshot at startup
+- Write-ahead logging with recovery at startup and configurable sync policy
 
 ## Build
 
@@ -35,7 +34,7 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The server executable is written to `build/output/Release/reddish.exe`.
+The server executable is written to `build/output/reddish.exe`.
 
 ### Linux
 
@@ -56,18 +55,16 @@ The server executable is `build/output/reddish`.
 The first positional argument changes the port. Configuration flags are optional:
 
 ```text
-reddish [port] [--max-keys <count>] [--dump-interval <seconds>] \
-        [--dump-path <path>] [--load-dump <path>]
+reddish [port] [--max-keys <count>] [--wal-path <path>] \
+        [--wal-sync everysec|always|none] [--no-wal]
 ```
 
 Examples:
 
 ```bash
-# Listen on port 6380 and allow at most 50,000 keys.
 ./build/output/reddish 6380 --max-keys 50000
 
-# Load a previous snapshot if it exists. A missing file prints a warning and starts empty.
-./build/output/reddish --load-dump ./data/reddish.snapshot
+./build/output/reddish --wal-path ./data/reddish.wal --wal-sync always
 ```
 
 Any RESP client can connect. For a quick manual check, `redis-cli` works for the commands Reddish supports:
@@ -94,9 +91,9 @@ Command names are case-insensitive. Values supplied through RESP are strings. `I
 
 ## Persistence and eviction
 
-Snapshots are written every five minutes by default and once when the server receives a clean stop signal. Pass `--dump-interval` or `--dump-path` to change that behavior. Reddish writes a temporary snapshot before replacing the old one.
+The default WAL is `reddish.wal`, with `everysec` syncing. Recovery replays the log at startup, retaining absolute expiry times. `always` syncs each write; `none` leaves syncing to the operating system. `--no-wal` disables persistence. Create the parent directory before choosing a custom WAL path. Snapshot flags are no longer supported. The WAL does not compact automatically.
 
-Expiry cleanup uses a min-heap, so normal command processing does not scan every key to find expired entries. When the key limit is reached, the least recently used key is evicted.
+Expiry cleanup uses a min-heap, so normal command processing does not scan every key to find expired entries. When the key limit is reached, the least recently used key is evicted. The default limit is 1,024 keys; this is a key count limit, not a byte limit.
 
 ## C++ client
 
@@ -107,7 +104,7 @@ cmake -S client/C++ -B build/client
 cmake --build build/client
 ```
 
-Include `client.hpp`, link `reddish_client`, create `reddish::client::Client`, then call `connect()` before sending commands. The client exposes methods for every server command and a generic `execute()` method for RESP command vectors.
+Include `client.hpp`, link `reddish_client`, create `reddish::client::Client`, then call `connect()` before sending commands. The client exposes methods for every server command and a generic `execute()` method for RESP command vectors. Calls return `std::expected` results containing raw RESP replies or an error. Replies are limited to 16 MiB; use one client per calling thread.
 
 ## Benchmarks
 
@@ -120,23 +117,12 @@ bash benchmarks/run_local.sh
 See [benchmarks/README.md](benchmarks/README.md) for setup and [benchmarks/benchmarks.md](benchmarks/benchmarks.md) for published local results.
 
 <!-- benchmark-summary:start -->
-### Latest benchmark summary
+### Benchmark results
 
-Generated from [the full benchmark report](benchmarks/benchmarks.md). This is a loopback measurement, not a general server comparison. Memcached is a string-cache baseline and is measured only for GET and SET.
-
-| Workload | Reddish ops/s | Redis ops/s | Valkey ops/s |
-|---|---:|---:|---:|
-| Read (GET) | 1.1362m | 1.1411m | 1.1210m |
-| Write (SET) | 0.9957m | 1.0092m | 1.0010m |
-| Mixed (50/50) | 1.0452m | 1.0631m | 1.0612m |
-
-| Simple-cache baseline | Memcached ops/s |
-|---|---:|
-| Read (GET) | 0.8425m |
-| Write (SET) | 0.7883m |
+See [measured results and limitations](benchmarks/benchmarks.md). The manual [benchmark workflow](https://github.com/amitverma-cf/reddish/actions/workflows/benchmark.yml) uploads raw samples, memory measurements, manifests, and profiles for its selected commit. It does not change repository files.
 
 <!-- benchmark-summary:end -->
 
 ## Scope
 
-Reddish deliberately does not implement Redis replication, clustering, ACLs, TLS, transactions, Lua scripting, modules, Pub/Sub, streams, or Redis's full command and data-type surface. It also has one server thread, so a slow snapshot or command blocks other clients until it finishes.
+Reddish deliberately does not implement Redis replication, clustering, ACLs, TLS, transactions, Lua scripting, modules, Pub/Sub, streams, or Redis's full command and data-type surface. Commands run on one event-loop thread; maintenance and WAL work use background threads. Slow commands and synchronous WAL writes can delay other clients.
