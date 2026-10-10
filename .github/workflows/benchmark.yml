@@ -1,44 +1,56 @@
 name: Benchmark artifacts
+run-name: Benchmark ${{ inputs.commit }}
 
 on:
   workflow_dispatch:
+    inputs:
+      commit:
+        description: Full current main commit SHA
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: benchmark-summary
+  group: benchmark-main
   cancel-in-progress: false
 
 jobs:
   benchmark:
-    runs-on: ubuntu-latest
-
+    if: github.ref == 'refs/heads/main' && github.sha == inputs.commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
-      - name: Check out selected revision
-        uses: actions/checkout@v4
-
-      - name: Install benchmark dependencies
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit }}
+      - name: Verify measured revision
+        env:
+          EXPECTED_SHA: ${{ inputs.commit }}
         run: |
-          sudo add-apt-repository --yes universe
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$GITHUB_SHA" = "$EXPECTED_SHA"
+      - name: Install build and profiling dependencies
+        run: |
           sudo apt-get update
-          sudo apt-get install --yes curl gpg lsb-release software-properties-common redis-server valkey-server memcached valgrind
-          curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" \
-            | sudo tee /etc/apt/sources.list.d/redis.list
-          sudo apt-get update
-          sudo apt-get install --yes memtier-benchmark
+          sudo apt-get install --yes build-essential cmake ninja-build git autoconf automake libtool pkg-config libevent-dev libpcre2-dev zlib1g-dev libssl-dev libzstd-dev memcached valgrind
           sudo sysctl -w vm.overcommit_memory=1
-
-      - name: Build Release server
+      - name: Build pinned comparison tools
+        run: |
+          mkdir -p benchmarks/results
+          BUILD_JOBS=2 bash benchmarks/install_tools.sh "$RUNNER_TEMP/benchmark-tools" 2>&1 | tee benchmarks/results/tool-build.log
+          echo "$RUNNER_TEMP/benchmark-tools/bin" >> "$GITHUB_PATH"
+          cp "$RUNNER_TEMP/benchmark-tools/manifest.txt" benchmarks/results/tools.txt
+      - name: Build and test Release server
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
-          cmake --build build --parallel
+          cmake --build build --parallel 4
           ctest --test-dir build --output-on-failure
-
-      - name: Run equal-workload benchmark
+      - name: Compare throughput and memory
         env:
-          RESULT_DIR: ${{ github.workspace }}/benchmarks/results/github-actions
+          RESULT_DIR: ${{ github.workspace }}/benchmarks/results/comparison
           REDDISH_BINARY: ${{ github.workspace }}/build/output/reddish
           KEYS: 100000
           VALUE_BYTES: 32
@@ -47,19 +59,26 @@ jobs:
           PIPELINE: 16
           DURATION_SECONDS: 30
           TRIALS: 5
+          MEMORY_TRIALS: 3
           INCLUDE_MEMCACHED: 1
           REQUIRE_MEMCACHED: 1
         run: bash benchmarks/run_local.sh
-
-      - name: Run profiles
+      - name: Write measured report
+        run: |
+          python3 benchmarks/report.py benchmarks/results/comparison
+          cat benchmarks/results/comparison/report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Profile command costs
         env:
-          RESULT_DIR: ${{ github.workspace }}/benchmarks/results/github-profile
+          RESULT_DIR: ${{ github.workspace }}/benchmarks/results/profile
         run: bash benchmarks/profile.sh
-      - name: Measure WAL modes separately
-        run: python3 benchmarks/network_profile.py build/output/reddish --output benchmarks/results/github-wal --duration 5 --trials 3
-      - name: Preserve raw results and profiles
+      - name: Profile real TCP traffic
+        run: python3 benchmarks/profile_network.py build/profile/output/reddish --output benchmarks/results/tcp-profile
+      - name: Compare WAL modes
+        run: python3 benchmarks/network_profile.py build/output/reddish --output benchmarks/results/wal --duration 5 --trials 3
+      - name: Preserve results and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: reddish-benchmarks-${{ github.sha }}
+          name: reddish-benchmarks-${{ inputs.commit }}
           path: benchmarks/results/
+          retention-days: 14
