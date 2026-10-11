@@ -35,7 +35,7 @@ jobs:
       - name: Install build and profiling dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes build-essential cmake ninja-build git autoconf automake libtool pkg-config libevent-dev libpcre2-dev zlib1g-dev libssl-dev libzstd-dev memcached valgrind
+          sudo apt-get install --yes build-essential cmake ninja-build git autoconf automake libtool pkg-config libevent-dev libpcre2-dev zlib1g-dev libssl-dev libzstd-dev memcached valgrind jq iproute2
           sudo sysctl -w vm.overcommit_memory=1
       - name: Build pinned comparison tools
         run: |
@@ -63,22 +63,25 @@ jobs:
           INCLUDE_MEMCACHED: 1
           REQUIRE_MEMCACHED: 1
         run: bash benchmarks/run_local.sh
-      - name: Write measured report
-        run: |
-          python3 benchmarks/report.py benchmarks/results/comparison
-          cat benchmarks/results/comparison/report.md >> "$GITHUB_STEP_SUMMARY"
       - name: Profile command costs
         env:
           RESULT_DIR: ${{ github.workspace }}/benchmarks/results/profile
         run: bash benchmarks/profile.sh
       - name: Profile real TCP traffic
-        run: python3 benchmarks/profile_network.py build/profile/output/reddish --output benchmarks/results/tcp-profile
+        run: bash benchmarks/profile_network.sh build/profile/output/reddish benchmarks/results/tcp-profile
       - name: Compare WAL modes
-        run: python3 benchmarks/network_profile.py build/output/reddish --output benchmarks/results/wal --duration 5 --trials 3
+        run: bash benchmarks/network_profile.sh build/output/reddish benchmarks/results/wal
+      - name: Write measured report
+        run: |
+          WAL_RESULTS_DIR=benchmarks/results/wal RESULTS_DIR=benchmarks/results/comparison bash benchmarks/publish_results.sh
+          cat benchmarks/benchmarks.md >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve results and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: reddish-benchmarks-${{ inputs.commit }}
-          path: benchmarks/results/
+          path: |
+            benchmarks/results/
+            benchmarks/benchmarks.md
+            README.md
           retention-days: 14

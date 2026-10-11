@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import zlib
 
 parser = argparse.ArgumentParser()
 parser.add_argument('binary'); parser.add_argument('--redis', action='store_true')
@@ -116,24 +117,20 @@ class Integration(unittest.TestCase):
         self.assertEqual(restored.command('HGET', 'h', 'f'), b'x' * 70000)
         self.assertIsNone(restored.command('GET', 'ttl'))
         for i in range(20): self.assertEqual(restored.command('GET', f'batch{i}'), str(i).encode())
-    def test_offline_snapshot_migration(self):
-        import importlib.util
-        spec = importlib.util.spec_from_file_location('importer', Path(__file__).resolve().parents[1] / 'benchmarks/migrate_snapshot.py')
-        importer = importlib.util.module_from_spec(spec); spec.loader.exec_module(importer)
-        def text(value): return struct.pack('<Q', len(value)) + value
-        for version in (1, 3):
-            source, wal = Path(self.temp.name) / f'v{version}.dump', Path(self.temp.name) / f'v{version}.wal'
-            data = struct.pack('<QQ', version, 2)
-            deadline = struct.pack('<q', -1 if version == 1 else 0)
-            data += text(b'counter') + deadline + b'\x01' + struct.pack('<q', 42)
-            data += text(b'list') + deadline + b'\x02' + struct.pack('<Q', 2) + b'\x00' + text(b'one') + b'\x01' + struct.pack('<q', 7)
-            source.write_bytes(data); importer.migrate(source, wal)
-            self.assertEqual(source.read_bytes(), data)
-            with self.assertRaises(FileExistsError): importer.migrate(source, wal)
-            server = self.start(('--wal-path', str(wal)))
-            self.assertEqual(server.command('INCR', 'counter'), 43)
-            self.assertEqual(server.command('LPOP', 'list'), b'one')
-            self.assertEqual(server.command('LPOP', 'list'), b'7')
+    def test_wal_typed_value_recovery(self):
+        def record(op, *args):
+            body = bytes((op, len(args))) + b''.join(struct.pack('<I', len(value)) + value for value in args)
+            return struct.pack('<II', len(body), zlib.crc32(body)) + body
+        wal = Path(self.temp.name) / 'typed.wal'
+        data = b'RDWAL001' + record(10, b'counter', b'42')
+        data += record(3, b'list', b's', b'one') + record(3, b'list', b'i', b'7')
+        data += record(0, b'binary', b'zero\x00line\r\n')
+        wal.write_bytes(data)
+        server = self.start(('--wal-path', str(wal)))
+        self.assertEqual(server.command('INCR', 'counter'), 43)
+        self.assertEqual(server.command('LPOP', 'list'), b'one')
+        self.assertEqual(server.command('LPOP', 'list'), b'7')
+        self.assertEqual(server.command('GET', 'binary'), b'zero\x00line\r\n')
     @unittest.skipUnless(options.redis and shutil.which('redis-server'), 'optional Redis differential comparison')
     def test_differential_commands(self):
         target, baseline = self.start(), self.start(redis=True)

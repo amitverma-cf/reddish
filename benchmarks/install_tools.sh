@@ -26,9 +26,13 @@ for project in memtier redis valkey; do
     memtier)
       (cd "$source_dir" && autoreconf -ivf && ./configure --prefix="$TOOL_DIR" && make --jobs="$BUILD_JOBS" && make install)
       ;;
-    redis|valkey)
-      make -C "$source_dir" --jobs="$BUILD_JOBS" "$project-server"
-      install -m 755 "$source_dir/src/$project-server" "$TOOL_DIR/bin/$project-server"
+    redis)
+      make -C "$source_dir" --jobs="$BUILD_JOBS" redis-server redis-cli
+      install -m 755 "$source_dir/src/redis-server" "$source_dir/src/redis-cli" "$TOOL_DIR/bin/"
+      ;;
+    valkey)
+      make -C "$source_dir" --jobs="$BUILD_JOBS" valkey-server
+      install -m 755 "$source_dir/src/valkey-server" "$TOOL_DIR/bin/valkey-server"
       ;;
   esac
   printf '%s %s %s\n' "$project" "$revision" "$repository" >> "$TOOL_DIR/revisions.txt"
