@@ -119,7 +119,26 @@ See [benchmarks/README.md](benchmarks/README.md) for setup and [benchmarks/bench
 <!-- benchmark-summary:start -->
 ### Benchmark results
 
-See [measured results and limitations](benchmarks/benchmarks.md). The manual [benchmark workflow](https://github.com/amitverma-cf/reddish/actions/workflows/benchmark.yml) uploads raw samples, memory measurements, manifests, and profiles for its selected commit. It does not change repository files.
+Local loopback results; persistence disabled. [Full report](benchmarks/benchmarks.md) includes trial ranges, latency, CPU, memory, and setup.
+
+| Workload | reddish ops/s | redis ops/s | valkey ops/s | memcached ops/s |
+|---|---:|---:|---:|---:|
+| reads | 409028 | 382192 | 390619 | 448644 |
+| writes | 368414 | 345827 | 359454 | 510926 |
+| mixed | 370083 | 390756 | 363498 | — |
+
+| Shape | Server | RSS MiB | Delta bytes/key |
+|---|---|---:|---:|
+| hashes | reddish | 13.92 | 109.27 |
+| hashes | redis | 23.12 | 105.73 |
+| hashes | valkey | 24.33 | 111.85 |
+| lists | reddish | 14.63 | 116.76 |
+| lists | redis | 23.12 | 106.17 |
+| lists | valkey | 24.33 | 111.85 |
+| strings | memcached | 17.83 | 131.07 |
+| strings | reddish | 12.33 | 92.60 |
+| strings | redis | 21.54 | 90.00 |
+| strings | valkey | 22.71 | 95.68 |
 
 <!-- benchmark-summary:end -->
 

@@ -33,7 +33,12 @@ RESULTS_DIR=local/benchmarks/<run> bash benchmarks/publish_results.sh
 
 ## Tools and profiles
 
-`install_tools.sh <new-directory>` builds pinned memtier, Redis, redis-cli, and Valkey binaries. It needs make, a C/C++ compiler, autoconf, automake, libtool, pkg-config, and development packages for libevent, PCRE2, OpenSSL, zlib, and zstd. Add `<new-directory>/bin` to `PATH`.
+`install_tools.sh <new-directory>` builds pinned memtier, Redis, redis-cli, and Valkey binaries. It needs make, a C/C++ compiler, autoconf, automake, libtool, pkg-config, and development packages for libevent, PCRE2, OpenSSL, zlib, and zstd. For example:
+
+```sh
+bash benchmarks/install_tools.sh local/benchmark-tools
+export PATH="$PWD/local/benchmark-tools/bin:$PATH"
+```
 
 ```sh
 bash benchmarks/profile.sh
