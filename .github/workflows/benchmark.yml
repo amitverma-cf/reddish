@@ -35,8 +35,12 @@ jobs:
       - name: Install build and profiling dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes build-essential cmake ninja-build git autoconf automake libtool pkg-config libevent-dev libpcre2-dev zlib1g-dev libssl-dev libzstd-dev memcached valgrind jq iproute2
+          sudo apt-get install --yes build-essential cmake ninja-build git autoconf automake libtool pkg-config libevent-dev libpcre2-dev zlib1g-dev libssl-dev libzstd-dev memcached valgrind jq iproute2 shellcheck
           sudo sysctl -w vm.overcommit_memory=1
+      - name: Check benchmark scripts
+        run: |
+          for script in benchmarks/*.sh; do bash -n "$script"; done
+          shellcheck -x benchmarks/*.sh
       - name: Build pinned comparison tools
         run: |
           mkdir -p benchmarks/results
