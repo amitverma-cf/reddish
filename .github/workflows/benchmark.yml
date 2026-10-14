@@ -43,6 +43,7 @@ jobs:
           shellcheck -x benchmarks/*.sh
       - name: Build pinned comparison tools
         run: |
+          set -euo pipefail
           mkdir -p benchmarks/results
           BUILD_JOBS=2 bash benchmarks/install_tools.sh "$RUNNER_TEMP/benchmark-tools" 2>&1 | tee benchmarks/results/tool-build.log
           echo "$RUNNER_TEMP/benchmark-tools/bin" >> "$GITHUB_PATH"

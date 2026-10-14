@@ -24,10 +24,12 @@ for project in memtier redis valkey; do
   [[ $(git -C "$source_dir" rev-parse HEAD) == "$revision" ]]
   case "$project" in
     memtier)
-      (cd "$source_dir" && autoreconf -ivf && ./configure --prefix="$TOOL_DIR" && make --jobs="$BUILD_JOBS" && make install)
+      (cd "$source_dir" && autoreconf -ivf && ./configure --prefix="$TOOL_DIR" && make --jobs="$BUILD_JOBS")
+      install -m 755 "$source_dir/memtier_benchmark" "$TOOL_DIR/bin/memtier_benchmark"
       ;;
     redis)
-      make -C "$source_dir" --jobs="$BUILD_JOBS" redis-server redis-cli
+      make -C "$source_dir" --jobs="$BUILD_JOBS" redis-server
+      make -C "$source_dir" --jobs="$BUILD_JOBS" redis-cli
       install -m 755 "$source_dir/src/redis-server" "$source_dir/src/redis-cli" "$TOOL_DIR/bin/"
       ;;
     valkey)
