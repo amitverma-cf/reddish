@@ -108,37 +108,39 @@ Include `client.hpp`, link `reddish_client`, create `reddish::client::Client`, t
 
 ## Benchmarks
 
-The benchmark runner compares Reddish, Redis, and Valkey with `memtier_benchmark` on Linux. Memcached is included as a string-cache baseline for `GET`, `SET`, and string-memory measurement only.
+The benchmark runner compares Reddish, Redis, and Valkey with `memtier_benchmark` on Linux. Memcached can be included as a string-cache baseline for `GET`, `SET`, and string-memory measurement only.
 
 ```bash
 bash benchmarks/run_local.sh
 ```
 
-See [benchmarks/README.md](benchmarks/README.md) for setup and [benchmarks/benchmarks.md](benchmarks/benchmarks.md) for published local results.
+See [benchmarks/README.md](benchmarks/README.md) for setup and [benchmarks/benchmarks.md](benchmarks/benchmarks.md) for the recorded results and measurement settings.
 
 <!-- benchmark-summary:start -->
 ### Benchmark results
 
-Local loopback results; persistence disabled. [Full report](benchmarks/benchmarks.md) includes trial ranges, latency, CPU, memory, and setup.
+GitHub Actions / Ubuntu 24.04, measured 2026-10-31 06:58:23 UTC; source revision [37fa2e4](https://github.com/amitverma-cf/reddish/commit/37fa2e4e55fc632abae4e4117eb26f60d712f5fd). Persistence disabled. [Full report](benchmarks/benchmarks.md) contains the same dataset, trial ranges, latency, CPU, memory, and setup.
+
+[Source workflow run](https://github.com/amitverma-cf/reddish/actions/runs/41178440561).
 
 | Workload | reddish ops/s | redis ops/s | valkey ops/s | memcached ops/s |
 |---|---:|---:|---:|---:|
-| reads | 409028 | 382192 | 390619 | 448644 |
-| writes | 368414 | 345827 | 359454 | 510926 |
-| mixed | 370083 | 390756 | 363498 | — |
+| reads | 1013326 | 1064699 | 1067436 | 1118063 |
+| writes | 956837 | 1023477 | 1008318 | 1089096 |
+| mixed | 972967 | 1044922 | 1042838 | — |
 
 | Shape | Server | RSS MiB | Delta bytes/key |
 |---|---|---:|---:|
-| hashes | reddish | 13.92 | 109.27 |
-| hashes | redis | 23.12 | 105.73 |
-| hashes | valkey | 24.33 | 111.85 |
-| lists | reddish | 14.63 | 116.76 |
-| lists | redis | 23.12 | 106.17 |
-| lists | valkey | 24.33 | 111.85 |
-| strings | memcached | 17.83 | 131.07 |
-| strings | reddish | 12.33 | 92.60 |
-| strings | redis | 21.54 | 90.00 |
-| strings | valkey | 22.71 | 95.68 |
+| hashes | reddish | 14.35 | 108.91 |
+| hashes | redis | 19.16 | 110.13 |
+| hashes | valkey | 17.31 | 103.88 |
+| lists | reddish | 15.06 | 116.12 |
+| lists | redis | 19.17 | 110.27 |
+| lists | valkey | 17.42 | 103.03 |
+| strings | memcached | 17.68 | 137.09 |
+| strings | reddish | 12.75 | 91.87 |
+| strings | redis | 17.67 | 94.26 |
+| strings | valkey | 15.79 | 87.49 |
 
 <!-- benchmark-summary:end -->
 
