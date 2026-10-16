@@ -18,9 +18,12 @@ TRIALS=${TRIALS:-5}
 WARMUP_SECONDS=${WARMUP_SECONDS:-2}
 MEMORY_TRIALS=${MEMORY_TRIALS:-3}
 RUN_EXTENDED=${RUN_EXTENDED:-1}
+RUN_VALIDATION=${RUN_VALIDATION:-1}
 RUN_PERFORMANCE=${RUN_PERFORMANCE:-1}
 RUN_MEMORY=${RUN_MEMORY:-1}
 REQUESTS_PER_CLIENT=${REQUESTS_PER_CLIENT:-0}
+KEY_PATTERN=${KEY_PATTERN:-S:S}
+[[ $KEY_PATTERN == S:S || $KEY_PATTERN == R:R ]] || { echo "Invalid key pattern" >&2; exit 1; }
 SERVER_COMMAND=()
 CLIENT_COMMAND=()
 [[ -z ${SERVER_CPU:-} ]] || SERVER_COMMAND=(taskset -c "$SERVER_CPU")
@@ -31,7 +34,7 @@ for setting in VALUE_BYTES THREADS CLIENTS PIPELINE DURATION_SECONDS AUXILIARY_D
 done
 [[ $WARMUP_SECONDS =~ ^[0-9]+$ ]] || { echo 'Invalid WARMUP_SECONDS' >&2; exit 1; }
 [[ $REQUESTS_PER_CLIENT =~ ^(0|[1-9][0-9]*)$ && ${#REQUESTS_PER_CLIENT} -le 9 ]] || { echo 'Invalid REQUESTS_PER_CLIENT' >&2; exit 1; }
-for setting in RUN_EXTENDED RUN_PERFORMANCE RUN_MEMORY; do
+for setting in RUN_EXTENDED RUN_PERFORMANCE RUN_MEMORY RUN_VALIDATION; do
   [[ ${!setting} == 0 || ${!setting} == 1 ]] || { echo "$setting must be 0 or 1" >&2; exit 1; }
 done
 [[ ! -e "$RESULT_DIR/results.csv" ]] || { echo "Refusing to overwrite $RESULT_DIR" >&2; exit 1; }
@@ -52,26 +55,44 @@ if [[ ${REQUIRE_MEMCACHED:-0} == 1 && $HAVE_MEMCACHED == 0 ]]; then
   echo 'GitHub comparison requires memcached and INCLUDE_MEMCACHED=1' >&2; exit 1
 fi
 
+test -x /usr/bin/time || { echo "Missing /usr/bin/time" >&2; exit 1; }
 test -x "$REDDISH_BINARY" || { echo "Missing reddish Release binary: $REDDISH_BINARY" >&2; exit 1; }
 
+if [[ $RUN_VALIDATION == 1 ]]; then
+  RESULT_DIR="$RESULT_DIR/validation" bash "$ROOT_DIR/benchmarks/validate.sh"
+fi
+worktree_state=clean
+[[ -z $(git -C "$ROOT_DIR" status --porcelain) ]] || worktree_state=dirty
+measured_at=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+platform=Linux
+! uname -r | grep -qi microsoft || platform=WSL2
+run_url=
+if [[ -n ${GITHUB_RUN_ID:-} ]]; then
+  platform="${BENCHMARK_ENVIRONMENT:-GitHub Actions / ${RUNNER_OS:-Linux}}"
+  run_url="${GITHUB_SERVER_URL:-https://github.com}/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+fi
+jq -n --arg revision "$(git -C "$ROOT_DIR" rev-parse HEAD)" --arg environment "$platform" --arg run_url "$run_url" --arg measured_at "$measured_at" '{revision:$revision,environment:$environment,run_url:$run_url,measured_at:$measured_at}' > "$RESULT_DIR/provenance.json"
 {
   git -C "$ROOT_DIR" rev-parse HEAD
   git -C "$ROOT_DIR" status --short
   git -C "$ROOT_DIR" diff --binary | sha256sum
   sha256sum "$REDDISH_BINARY"
-  date -u '+Measured at %Y-%m-%d %H:%M:%S UTC'
+  printf 'Measured at %s\n' "$measured_at"
+  printf 'WORKTREE_STATE=%s\n' "$worktree_state"
   uname -a
   lscpu
   memtier_benchmark --version
   redis-server --version
   valkey-server --version
   [[ $HAVE_MEMCACHED == 0 ]] || memcached --version
+  printf 'SCHEDSTATS_MODE=%s\n' "$(cat /proc/sys/kernel/sched_schedstats 2>/dev/null || echo unavailable)"
   printf 'SERVER_CPU=%s CLIENT_CPUS=%s\n' "${SERVER_CPU:-unbound}" "${CLIENT_CPUS:-unbound}"
-  printf 'REQUESTS_PER_CLIENT=%s\n' "$REQUESTS_PER_CLIENT"
+  printf 'REQUESTS_PER_CLIENT=%s KEY_PATTERN=%s\n' "$REQUESTS_PER_CLIENT" "$KEY_PATTERN"
+  printf 'RUN_PERFORMANCE=%s RUN_MEMORY=%s RUN_VALIDATION=%s\n' "$RUN_PERFORMANCE" "$RUN_MEMORY" "$RUN_VALIDATION"
   printf 'KEYS=%s VALUE_BYTES=%s THREADS=%s CLIENTS=%s PIPELINE=%s TRIALS=%s DURATION_SECONDS=%s WARMUP_SECONDS=%s MEMORY_TRIALS=%s RUN_EXTENDED=%s AUXILIARY_DURATION_SECONDS=%s persistence=disabled\n' "$KEYS" "$VALUE_BYTES" "$THREADS" "$CLIENTS" "$PIPELINE" "$TRIALS" "$DURATION_SECONDS" "$WARMUP_SECONDS" "$MEMORY_TRIALS" "$RUN_EXTENDED" "$AUXILIARY_DURATION_SECONDS"
 } > "$RESULT_DIR/manifest.txt"
+printf 'server,workload,trial,workload_seconds,server_cpu_seconds,client_cpu_seconds,client_max_rss_kib,main_runtime_seconds,main_runqueue_seconds,main_blocked_seconds,main_voluntary_switches,main_involuntary_switches,operation_count,client_elapsed_seconds\n' > "$RESULT_DIR/process.csv"
 printf 'server,workload,trial,cpu_seconds,operation_count,cpu_us_per_op\n' > "$RESULT_DIR/cpu.csv"
-cpu_ticks() { awk '{print $14 + $15}' "/proc/$server_pid/stat"; }
 ticks_per_second=$(getconf CLK_TCK)
 find "$ROOT_DIR/src" -type f \( -name '*.cpp' -o -name '*.hpp' \) -print0 | sort -z | xargs -0 sha256sum > "$RESULT_DIR/source-files.sha256"
 find "$ROOT_DIR/benchmarks" -maxdepth 1 -type f -name '*.sh' -print0 | sort -z | xargs -0 sha256sum > "$RESULT_DIR/benchmark-files.sha256"
@@ -101,7 +122,12 @@ start_server() {
   kill -0 "$server_pid" 2>/dev/null || { cat "$log" >&2; exit 1; }
 }
 
-stop_server() { cleanup; server_pid=; }
+stop_server() {
+  kill -INT "$server_pid"
+  timeout 20 tail --pid="$server_pid" -f /dev/null
+  wait "$server_pid"
+  server_pid=
+}
 rss_kib() {
   for ((sample=0; sample<5; sample++)); do
     awk '/^VmRSS:/{print $2}' "/proc/$server_pid/status"
@@ -124,7 +150,9 @@ protocol_for() {
 memtier_base() {
   local server=$1 port=$2
   shift 2
-  "${CLIENT_COMMAND[@]}" memtier_benchmark --server=127.0.0.1 --port="$port" --protocol="$(protocol_for "$server")" --threads="$THREADS" --clients="$CLIENTS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-minimum=1 --key-maximum="$KEY_MAX" --hide-histogram "$@"
+  local -a accounting=()
+  [[ -z ${CLIENT_TIME_FILE:-} ]] || accounting=(/usr/bin/time -f '%U,%S,%e,%M' -o "$CLIENT_TIME_FILE")
+  "${CLIENT_COMMAND[@]}" "${accounting[@]}" memtier_benchmark --server=127.0.0.1 --port="$port" --protocol="$(protocol_for "$server")" --threads="$THREADS" --clients="$CLIENTS" --pipeline="$PIPELINE" --data-size="$VALUE_BYTES" --key-minimum=1 --key-maximum="$KEY_MAX" --hide-histogram "$@"
 }
 
 preload_strings() {
@@ -138,8 +166,13 @@ preload_command() {
 }
 
 append_result() {
-  local server=$1 workload=$2 trial=$3 raw=$4 expected=${5:-0}
-  local values
+  local server=$1 workload=$2 trial=$3 raw=$4 expected=${5:-0} before=$6 after=$7
+  local values count client_user client_system elapsed max_rss client_elapsed
+  count=$(jq -er '.["ALL STATS"].Totals.Count' "$raw.json")
+  IFS=, read -r client_user client_system client_elapsed max_rss < "$raw.client-time.csv"
+  elapsed=$(jq -er '.["ALL STATS"].Runtime["Total duration"] / 1000' "$raw.json")
+  awk -v s="$server" -v w="$workload" -v t="$trial" -v before="$before" -v after="$after" -v hz="$ticks_per_second" -v n="$count" 'BEGIN{split(before,b," ");split(after,a," ");cpu=(a[1]-b[1])/hz;printf "%s,%s,%d,%.6f,%d,%.6f\n",s,w,t,cpu,n,cpu*1000000/n}' >> "$RESULT_DIR/cpu.csv"
+  awk -v s="$server" -v w="$workload" -v t="$trial" -v before="$before" -v after="$after" -v hz="$ticks_per_second" -v n="$count" -v cu="$client_user" -v cs="$client_system" -v elapsed="$elapsed" -v rss="$max_rss" -v client_elapsed="$client_elapsed" 'BEGIN{split(before,b," ");split(after,a," ");available=(b[2]>0&&a[2]>=b[2]);runtime=(a[2]-b[2])/1e9;queue=(a[3]-b[3])/1e9;blocked=elapsed-runtime-queue;if(blocked<0)blocked=0;printf "%s,%s,%d,%.3f,%.6f,%.6f,%d,%s,%s,%s,%d,%d,%d,%.3f\n",s,w,t,elapsed,(a[1]-b[1])/hz,cu+cs,rss,(available?sprintf("%.6f",runtime):"NA"),(available?sprintf("%.6f",queue):"NA"),(available?sprintf("%.6f",blocked):"NA"),a[4]-b[4],a[5]-b[5],n,client_elapsed}' >> "$RESULT_DIR/process.csv"
   values=$(read_stats "$raw.json" "$workload" "$expected")
   printf '%s,%s,%s,%s\n' "$server" "$workload" "$trial" "${values%,*}" >> "$RESULT_DIR/results.csv"
 }
@@ -149,22 +182,20 @@ run_ratio() {
   local raw="$RESULT_DIR/temp/$server-$workload-$trial.txt"
   local -a limit=(--test-time "$DURATION_SECONDS")
   ((REQUESTS_PER_CLIENT == 0)) || limit=(--requests "$REQUESTS_PER_CLIENT")
-  local before; before=$(cpu_ticks)
+  local before after; before=$(sample_process "$server_pid")
   echo "Timing $server $workload trial=$trial" >&2
-  memtier_base "$server" "$port" "${limit[@]}" --key-pattern=S:S --ratio="$ratio" --json-out-file="$raw.json" --failed-keys-file="$raw.failed.csv" >"$raw" 2>"$raw.stderr"
-  append_result "$server" "$workload" "$trial" "$raw" "$((REQUESTS_PER_CLIENT * THREADS * CLIENTS))"
-  local after count; after=$(cpu_ticks); count=$(jq -er '.["ALL STATS"].Totals.Count' "$raw.json")
-  awk -v server="$server" -v work="$workload" -v trial="$trial" -v before="$before" -v after="$after" -v hz="$ticks_per_second" -v count="$count" 'BEGIN{s=(after-before)/hz; printf "%s,%s,%s,%.6f,%d,%.6f\n",server,work,trial,s,count,s*1000000/count}' >> "$RESULT_DIR/cpu.csv"
+  CLIENT_TIME_FILE="$raw.client-time.csv" memtier_base "$server" "$port" "${limit[@]}" --key-pattern="$KEY_PATTERN" --ratio="$ratio" --json-out-file="$raw.json" --failed-keys-file="$raw.failed.csv" >"$raw" 2>"$raw.stderr"
+  after=$(sample_process "$server_pid")
+  append_result "$server" "$workload" "$trial" "$raw" "$((REQUESTS_PER_CLIENT * THREADS * CLIENTS))" "$before" "$after"
 }
 
 run_command() {
   local server=$1 port=$2 trial=$3 workload=$4; shift 4
   local raw="$RESULT_DIR/temp/$server-$workload-$trial.txt"
-  local before; before=$(cpu_ticks)
-  memtier_base "$server" "$port" --test-time "$AUXILIARY_DURATION_SECONDS" "$@" --json-out-file="$raw.json" --failed-keys-file="$raw.failed.csv" >"$raw" 2>"$raw.stderr"
-  append_result "$server" "$workload" "$trial" "$raw"
-  local after count; after=$(cpu_ticks); count=$(jq -er '.["ALL STATS"].Totals.Count' "$raw.json")
-  awk -v server="$server" -v work="$workload" -v trial="$trial" -v before="$before" -v after="$after" -v hz="$ticks_per_second" -v count="$count" 'BEGIN{s=(after-before)/hz; printf "%s,%s,%s,%.6f,%d,%.6f\n",server,work,trial,s,count,s*1000000/count}' >> "$RESULT_DIR/cpu.csv"
+  local before after; before=$(sample_process "$server_pid")
+  CLIENT_TIME_FILE="$raw.client-time.csv" memtier_base "$server" "$port" --test-time "$AUXILIARY_DURATION_SECONDS" "$@" --json-out-file="$raw.json" --failed-keys-file="$raw.failed.csv" >"$raw" 2>"$raw.stderr"
+  after=$(sample_process "$server_pid")
+  append_result "$server" "$workload" "$trial" "$raw" 0 "$before" "$after"
 }
 
 run_extended() {
@@ -204,7 +235,7 @@ if [[ $RUN_PERFORMANCE == 1 ]]; then
     preload_strings "$server" "$port" "$RESULT_DIR/temp/$server-strings-preload-$trial.txt"
     verify_preload "$server" "$port" "$KEYS" >/dev/null
     if ((WARMUP_SECONDS > 0)); then
-      memtier_base "$server" "$port" --test-time "$WARMUP_SECONDS" --key-pattern=S:S --ratio=1:1 >"$RESULT_DIR/temp/$server-warmup-$trial.txt" 2>&1
+      memtier_base "$server" "$port" --test-time "$WARMUP_SECONDS" --key-pattern="$KEY_PATTERN" --ratio=1:1 >"$RESULT_DIR/temp/$server-warmup-$trial.txt" 2>&1
     fi
     if ((trial % 2)); then
       run_ratio "$server" "$port" "$trial" reads 0:1
