@@ -49,8 +49,9 @@ jobs:
 
       - name: Check benchmark scripts
         run: |
-          for script in benchmarks/*.sh; do bash -n "$script"; done
-          shellcheck -x benchmarks/*.sh
+          for script in benchmarks/*.sh tests/benchmark_tests.sh; do bash -n "$script"; done
+          shellcheck -x benchmarks/*.sh tests/benchmark_tests.sh
+          bash tests/benchmark_tests.sh
 
       - name: Check C++ formatting
         run: |
