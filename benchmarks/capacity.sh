@@ -14,6 +14,7 @@ mkdir -p "$RESULT_DIR"
 RESULT_DIR=$(realpath "$RESULT_DIR")
 if [[ -z ${SERVER_CPU:-} && -z ${CLIENT_CPUS:-} ]]; then choose_cpus; fi
 [[ -n ${SERVER_CPU:-} && -n ${CLIENT_CPUS:-} ]] || { echo 'Set both CPU affinity options' >&2; exit 1; }
+client_slots=$(taskset -c "$CLIENT_CPUS" nproc)
 {
   git -C "$ROOT_DIR" rev-parse HEAD
   date -u '+Measured at %Y-%m-%d %H:%M:%S UTC'
@@ -21,7 +22,7 @@ if [[ -z ${SERVER_CPU:-} && -z ${CLIENT_CPUS:-} ]]; then choose_cpus; fi
   printf 'SERVER_CPU=%s CLIENT_CPUS=%s P99_LIMIT_MS=%s TRIALS=%s DURATION_SECONDS=%s\n' "$SERVER_CPU" "$CLIENT_CPUS" "$P99_LIMIT_MS" "$TRIALS" "$DURATION_SECONDS"
   printf 'Blocked time is estimated for each server main thread; missing schedstat is NA. CPU per worker includes client process overhead.\n'
 } > "$RESULT_DIR/manifest.txt"
-printf 'case,server,workload,keys,value_bytes,total_clients,threads,pipeline,key_pattern,trials,mean_ops_per_sec,min_ops_per_sec,max_ops_per_sec,max_trial_p99_ms,server_cpu_pct,client_cpu_pct_per_worker,mean_main_blocked_seconds,slo_pass\n' > "$RESULT_DIR/summary.csv"
+printf 'case,server,workload,keys,value_bytes,total_clients,threads,pipeline,key_pattern,trials,mean_ops_per_sec,min_ops_per_sec,max_ops_per_sec,max_trial_p99_ms,server_cpu_pct,client_cpu_pct_per_worker,mean_main_blocked_seconds,slo_pass,client_cpu_pct_total,client_cpu_slots\n' > "$RESULT_DIR/summary.csv"
 if [[ -z ${VALIDATION_DIR:-} ]]; then
   REDDISH_BINARY="$REDDISH_BINARY" RESULT_DIR="$RESULT_DIR/validation" bash "$ROOT_DIR/benchmarks/validate.sh"
 else
@@ -36,7 +37,7 @@ for point in $CAPACITY_POINTS; do
   name="c$total-t$threads-p$pipeline-v$bytes-k$keys-$pattern"
   case_dir="$RESULT_DIR/$name"
   REDDISH_BINARY="$REDDISH_BINARY" RESULT_DIR="$case_dir" KEYS="$keys" VALUE_BYTES="$bytes" THREADS="$threads" CLIENTS="$((total/threads))" PIPELINE="$pipeline" KEY_PATTERN="$pattern:$pattern" TRIALS="$TRIALS" DURATION_SECONDS="$DURATION_SECONDS" WARMUP_SECONDS=1 REQUESTS_PER_CLIENT=0 RUN_VALIDATION=0 RUN_EXTENDED=0 RUN_MEMORY=0 RUN_PERFORMANCE=1 INCLUDE_MEMCACHED=0 REQUIRE_MEMCACHED=0 OUTPUT_FILE="$case_dir/report.md" README_FILE='' bash "$ROOT_DIR/benchmarks/run_local.sh"
-  awk -F, -v name="$name" -v clients="$total" -v threads="$threads" -v pipeline="$pipeline" -v bytes="$bytes" -v keys="$keys" -v pattern="$pattern:$pattern" -v limit="$P99_LIMIT_MS" 'FNR==1{next} FILENAME==ARGV[1]{k=$1 FS $2;elapsed[k]+=$4;server[k]+=$5;client[k]+=$6;if($10!="NA"){blocked[k]+=$10;bcount[k]++}next} FILENAME==ARGV[2]{k=$1 FS $2;if($7>p99[k])p99[k]=$7;next} {k=$1 FS $2;printf "%s,%s,%d,%d,%d,%d,%d,%s,%d,%.2f,%.2f,%.2f,%.3f,%.2f,%.2f,%s,%s\n",name,k,keys,bytes,clients,threads,pipeline,pattern,$3,$4,$6,$7,p99[k],server[k]/elapsed[k]*100,client[k]/elapsed[k]/threads*100,(bcount[k]?sprintf("%.6f",blocked[k]/bcount[k]):"NA"),(p99[k]<=limit?"true":"false")}' "$case_dir/process.csv" "$case_dir/results.csv" "$case_dir/summary.csv" >> "$RESULT_DIR/summary.csv"
+  awk -F, -v name="$name" -v clients="$total" -v threads="$threads" -v pipeline="$pipeline" -v bytes="$bytes" -v keys="$keys" -v pattern="$pattern:$pattern" -v limit="$P99_LIMIT_MS" -v slots="$client_slots" 'FNR==1{next} FILENAME==ARGV[1]{k=$1 FS $2;elapsed[k]+=$4;server[k]+=$5;client[k]+=$6;if($10!="NA"){blocked[k]+=$10;bcount[k]++}next} FILENAME==ARGV[2]{k=$1 FS $2;if($7>p99[k])p99[k]=$7;next} {k=$1 FS $2;printf "%s,%s,%d,%d,%d,%d,%d,%s,%d,%.2f,%.2f,%.2f,%.3f,%.2f,%.2f,%s,%s,%.2f,%d\n",name,k,keys,bytes,clients,threads,pipeline,pattern,$3,$4,$6,$7,p99[k],server[k]/elapsed[k]*100,client[k]/elapsed[k]/threads*100,(bcount[k]?sprintf("%.6f",blocked[k]/bcount[k]):"NA"),(p99[k]<=limit?"true":"false"),client[k]/elapsed[k]*100,slots}' "$case_dir/process.csv" "$case_dir/results.csv" "$case_dir/summary.csv" >> "$RESULT_DIR/summary.csv"
 done
 {
   head -1 "$RESULT_DIR/summary.csv"

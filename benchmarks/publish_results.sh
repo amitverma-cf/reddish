@@ -107,9 +107,9 @@ report="$RESULTS_DIR/report.md"
     grep '^SERVER_CPU=' "$CAPACITY_DIR/manifest.txt"
     printf '```\n\n| Server | Workload | Keys | Bytes | Clients | Threads | Pipeline | Pattern | Trials | Mean ops/s | Worst trial p99 ms |\n|---|---|---:|---:|---:|---:|---:|---|---:|---:|---:|\n'
     awk -F, 'NR>1{printf "| %s | %s | %d | %d | %d | %d | %d | %s | %d | %.0f | %.3f |\n",$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$14}' "$CAPACITY_DIR/best-observed.csv"
-    printf '\n<details>\n<summary>Every tested operating point</summary>\n\n| Case | Server | Workload | Trials | Mean ops/s | Worst p99 ms | Server CPU %% | Client CPU/worker %% | Meets p99 limit |\n|---|---|---|---:|---:|---:|---:|---:|---|\n'
-    awk -F, 'NR>1{printf "| %s | %s | %s | %d | %.0f | %.3f | %.2f | %.2f | %s |\n",$1,$2,$3,$10,$11,$14,$15,$16,$18}' "$CAPACITY_DIR/summary.csv"
-    printf '\nCase names record total clients (c), client threads (t), pipeline (p), bytes (v), keys (k), and sequential/random pattern (S/R).\n\n</details>\n'
+    printf '\n<details>\n<summary>Every tested operating point</summary>\n\n| Case | Server | Workload | Trials | Mean ops/s | Worst p99 ms | Server CPU %% | Client CPU/worker %% | Client CPU/budget %% | Meets p99 limit |\n|---|---|---|---:|---:|---:|---:|---:|---:|---|\n'
+    awk -F, 'NR>1{printf "| %s | %s | %s | %d | %.0f | %.3f | %.2f | %.2f | %s | %s |\n",$1,$2,$3,$10,$11,$14,$15,$16,($20?sprintf("%.2f",$19/$20):"NA"),$18}' "$CAPACITY_DIR/summary.csv"
+    printf '\nCase names record total clients (c), client threads (t), pipeline (p), bytes (v), keys (k), and sequential/random pattern (S/R). Client budget uses the available CPU count reported by nproc under the assigned affinity; SMT threads share physical resources. Older data without that count is NA.\n\n</details>\n'
   else
     printf 'No capacity sweep was recorded for this run. The baseline comparison is not a capacity claim.\n'
   fi
