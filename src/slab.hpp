@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory_resource>
 #include <new>
 #include <vector>
 
@@ -42,7 +43,10 @@ inline std::size_t class_index(std::size_t size) noexcept
 class SlabPool
 {
   public:
-    SlabPool() = default;
+    explicit SlabPool(std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+        : memory_(memory)
+    {
+    }
     ~SlabPool()
     {
         release();
@@ -53,6 +57,7 @@ class SlabPool
 
     void *allocate(std::size_t size);
     void deallocate(void *block, std::size_t size) noexcept;
+    void reclaim() noexcept;
 
     std::size_t reserved_bytes() const noexcept
     {
@@ -77,6 +82,8 @@ class SlabPool
     {
         void *memory;
         std::size_t bytes;
+        std::size_t index;
+        Chunk *next;
     };
 
     static constexpr std::size_t chunk_bytes = 64 * 1024;
@@ -85,7 +92,8 @@ class SlabPool
     void release() noexcept;
 
     FreeBlock *free_lists_[class_count] = {};
-    std::vector<Chunk> chunks_;
+    Chunk *chunks_ = nullptr;
+    std::pmr::memory_resource *memory_;
     std::size_t reserved_ = 0;
 };
 }

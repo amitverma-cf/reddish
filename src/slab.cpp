@@ -14,14 +14,16 @@ void SlabPool::add_chunk(std::size_t index)
     while (bytes < block * 16)
         bytes *= 2;
 
-    void *memory = ::operator new(bytes);
+    void *memory = memory_->allocate(bytes);
     try
     {
-        chunks_.push_back({memory, bytes});
+        auto *chunk = static_cast<Chunk *>(memory_->allocate(sizeof(Chunk), alignof(Chunk)));
+        new (chunk) Chunk{memory, bytes, index, chunks_};
+        chunks_ = chunk;
     }
     catch (...)
     {
-        ::operator delete(memory);
+        memory_->deallocate(memory, bytes);
         throw;
     }
     reserved_ += bytes;
@@ -38,7 +40,7 @@ void SlabPool::add_chunk(std::size_t index)
 
 void *SlabPool::allocate(std::size_t size)
 {
-    if (size > largest_class) return ::operator new(size);
+    if (size > largest_class) return memory_->allocate(size);
 
     const std::size_t index = class_index(size);
     if (free_lists_[index] == nullptr) add_chunk(index);
@@ -54,7 +56,7 @@ void SlabPool::deallocate(void *block, std::size_t size) noexcept
 
     if (size > largest_class)
     {
-        ::operator delete(block);
+        memory_->deallocate(block, size);
         return;
     }
 
@@ -66,12 +68,47 @@ void SlabPool::deallocate(void *block, std::size_t size) noexcept
 
 void SlabPool::release() noexcept
 {
-    for (const auto &chunk : chunks_)
-        ::operator delete(chunk.memory);
-    chunks_.clear();
+    while (chunks_)
+    {
+        auto *chunk = chunks_;
+        chunks_ = chunk->next;
+        memory_->deallocate(chunk->memory, chunk->bytes);
+        memory_->deallocate(chunk, sizeof(Chunk), alignof(Chunk));
+    }
     for (auto &list : free_lists_)
         list = nullptr;
     reserved_ = 0;
+}
+
+void SlabPool::reclaim() noexcept
+{
+    for (auto **entry = &chunks_; *entry;)
+    {
+        auto *chunk = *entry;
+        const auto begin = reinterpret_cast<std::uintptr_t>(chunk->memory);
+        const auto end = begin + chunk->bytes;
+        std::size_t free = 0;
+        for (auto *block = free_lists_[chunk->index]; block; block = block->next)
+        {
+            const auto address = reinterpret_cast<std::uintptr_t>(block);
+            if (address >= begin && address < end) ++free;
+        }
+        if (free != chunk->bytes / class_sizes[chunk->index])
+        {
+            entry = &chunk->next;
+            continue;
+        }
+        for (auto **block = &free_lists_[chunk->index]; *block;)
+        {
+            const auto address = reinterpret_cast<std::uintptr_t>(*block);
+            if (address >= begin && address < end) *block = (*block)->next;
+            else block = &(*block)->next;
+        }
+        *entry = chunk->next;
+        reserved_ -= chunk->bytes;
+        memory_->deallocate(chunk->memory, chunk->bytes);
+        memory_->deallocate(chunk, sizeof(Chunk), alignof(Chunk));
+    }
 }
 
 }
