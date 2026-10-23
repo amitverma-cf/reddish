@@ -48,6 +48,8 @@ class Wal
     void flush();
     void begin_batch();
     void end_batch();
+    void compact(const std::function<void(Wal &)> &write);
+    void reserve_record(std::size_t bytes);
     std::size_t bytes() const noexcept
     {
         return bytes_.load();
@@ -60,6 +62,8 @@ class Wal
   private:
     void flush_locked();
     std::FILE *file_ = nullptr;
+    std::FILE *lock_file_ = nullptr;
+    std::filesystem::path path_;
     std::array<char, 64 * 1024> file_buffer_{};
     WalSync sync_;
     std::mutex mutex_;

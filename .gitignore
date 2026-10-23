@@ -44,6 +44,7 @@ dump.reddish
 # Write-ahead log and profiling output
 *.wal
 *.wal.lock
+*.wal.compact-*
 callgrind.out.*
 __pycache__/
 *.pyc

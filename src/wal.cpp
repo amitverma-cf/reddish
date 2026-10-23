@@ -20,6 +20,21 @@ namespace
 {
 constexpr std::string_view magic = "RDWAL001";
 constexpr std::uint32_t max_record = 128 * 1024 * 1024;
+void take_lock(std::FILE *file)
+{
+#ifdef _WIN32
+    OVERLAPPED lock{};
+    lock.Offset = 0xffffffff;
+    lock.OffsetHigh = 0x7fffffff;
+    if (!LockFileEx(reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(file))),
+                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &lock))
+        throw Error{ErrorCode::disk_write_failed};
+#else
+    if (::flock(fileno(file), LOCK_EX | LOCK_NB) != 0 ||
+        ::fcntl(fileno(file), F_SETFD, FD_CLOEXEC) != 0)
+        throw Error{ErrorCode::disk_write_failed};
+#endif
+}
 constexpr auto crc_table = []
 {
     std::array<std::uint32_t, 256> table{};
@@ -104,30 +119,27 @@ std::size_t recover(const std::filesystem::path &path, const Wal::Replay &replay
 }
 }
 
-Wal::Wal(const std::filesystem::path &path, WalSync sync, const Replay &replay) : sync_(sync)
+Wal::Wal(const std::filesystem::path &path, WalSync sync, const Replay &replay)
+    : path_(path), sync_(sync)
 {
+    auto lock_path = path;
+    lock_path += ".lock";
 #ifdef _WIN32
-    file_ = _wfopen(path.c_str(), L"abN");
+    lock_file_ = _wfopen(lock_path.c_str(), L"abN");
 #else
-    file_ = std::fopen(path.c_str(), "ab");
+    lock_file_ = std::fopen(lock_path.c_str(), "ab");
 #endif
-    if (!file_) throw Error{ErrorCode::disk_write_failed};
+    if (!lock_file_) throw Error{ErrorCode::disk_write_failed};
     try
     {
+        take_lock(lock_file_);
 #ifdef _WIN32
-
-        OVERLAPPED lock{};
-        lock.Offset = 0xffffffff;
-        lock.OffsetHigh = 0x7fffffff;
-        if (!LockFileEx(reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(file_))),
-                        LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &lock))
-            throw Error{ErrorCode::disk_write_failed};
+        file_ = _wfopen(path.c_str(), L"abN");
 #else
-        if (::flock(fileno(file_), LOCK_EX | LOCK_NB) != 0)
-            throw Error{ErrorCode::disk_write_failed};
-        if (::fcntl(fileno(file_), F_SETFD, FD_CLOEXEC) != 0)
-            throw Error{ErrorCode::disk_write_failed};
+        file_ = std::fopen(path.c_str(), "abe");
 #endif
+        if (!file_) throw Error{ErrorCode::disk_write_failed};
+        take_lock(file_);
         const auto valid = recover(path, replay);
         if (std::setvbuf(file_, file_buffer_.data(), _IOFBF, file_buffer_.size()) != 0)
             throw Error{ErrorCode::disk_write_failed};
@@ -174,8 +186,10 @@ Wal::Wal(const std::filesystem::path &path, WalSync sync, const Replay &replay) 
     }
     catch (...)
     {
-        std::fclose(file_);
+        if (file_) std::fclose(file_);
+        std::fclose(lock_file_);
         file_ = nullptr;
+        lock_file_ = nullptr;
         throw;
     }
 }
@@ -196,6 +210,7 @@ Wal::~Wal()
         }
         std::fclose(file_);
     }
+    if (lock_file_) std::fclose(lock_file_);
 }
 void Wal::append(WalOp op, std::initializer_list<std::string_view> args)
 {
@@ -231,6 +246,12 @@ void Wal::append(WalOp op, std::initializer_list<std::string_view> args)
     bytes_ += buffer_.size();
     dirty_ = true;
     if (sync_ == WalSync::always && !defer_sync_) flush_locked();
+}
+void Wal::reserve_record(std::size_t bytes)
+{
+    std::lock_guard guard(mutex_);
+    if (bytes > max_record + 8) throw Error{ErrorCode::request_too_large};
+    buffer_.reserve(bytes);
 }
 void Wal::flush_locked()
 {
@@ -271,5 +292,71 @@ void Wal::end_batch()
     std::lock_guard guard(mutex_);
     defer_sync_ = false;
     if (sync_ == WalSync::always) flush_locked();
+}
+
+void Wal::compact(const std::function<void(Wal &)> &write)
+{
+    std::lock_guard guard(mutex_);
+    if (failed_ || defer_sync_) throw Error{ErrorCode::disk_write_failed};
+    auto temporary = path_;
+    temporary +=
+        ".compact-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    if (std::filesystem::exists(temporary)) throw Error{ErrorCode::disk_write_failed};
+    auto temporary_lock = temporary;
+    temporary_lock += ".lock";
+    bool switching = false;
+    try
+    {
+        std::size_t bytes;
+        {
+            Wal replacement(temporary, WalSync::always, [](WalOp, const auto &) {});
+            replacement.begin_batch();
+            write(replacement);
+            replacement.end_batch();
+            replacement.flush();
+            bytes = replacement.bytes();
+        }
+        if (recover(temporary, [](WalOp, const auto &) {}) != bytes)
+            throw Error{ErrorCode::disk_read_failed};
+        flush_locked();
+        switching = true;
+        if (std::fclose(file_) != 0)
+        {
+            file_ = nullptr;
+            throw Error{ErrorCode::disk_write_failed};
+        }
+        file_ = nullptr;
+#ifdef _WIN32
+        if (!MoveFileExW(temporary.c_str(), path_.c_str(),
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            throw Error{ErrorCode::disk_write_failed};
+        file_ = _wfopen(path_.c_str(), L"abN");
+#else
+        std::filesystem::rename(temporary, path_);
+        auto parent = path_.parent_path();
+        if (parent.empty()) parent = ".";
+        const int directory = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (directory < 0) throw Error{ErrorCode::disk_write_failed};
+        const int status = ::fsync(directory);
+        ::close(directory);
+        if (status != 0) throw Error{ErrorCode::disk_write_failed};
+        file_ = std::fopen(path_.c_str(), "abe");
+#endif
+        if (!file_ || std::setvbuf(file_, file_buffer_.data(), _IOFBF, file_buffer_.size()) != 0)
+            throw Error{ErrorCode::disk_write_failed};
+        take_lock(file_);
+        bytes_ = bytes;
+        dirty_ = false;
+        std::error_code error;
+        std::filesystem::remove(temporary_lock, error);
+    }
+    catch (...)
+    {
+        if (switching) failed_ = true;
+        std::error_code error;
+        std::filesystem::remove(temporary, error);
+        std::filesystem::remove(temporary_lock, error);
+        throw;
+    }
 }
 }
