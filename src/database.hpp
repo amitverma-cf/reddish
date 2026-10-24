@@ -1,4 +1,5 @@
 #pragma once
+#include "memory.hpp"
 #include "pack.hpp"
 #include "result.hpp"
 #include "slab.hpp"
@@ -13,6 +14,7 @@
 #include <optional>
 #include <queue>
 #include <shared_mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -47,12 +49,14 @@ struct DatabaseStats
     std::uint64_t evictions;
     std::uint64_t expired_keys;
     std::size_t reserved_memory_bytes;
+    std::size_t owned_memory_bytes;
+    std::size_t max_memory_bytes;
 };
 
 class Database
 {
   public:
-    explicit Database(std::size_t max_keys = 1024);
+    explicit Database(std::size_t max_keys = 1024, std::size_t max_memory = 0);
     ~Database();
 
     Database(const Database &) = delete;
@@ -71,6 +75,8 @@ class Database
 
     Result<std::int64_t> push_left_text(std::string_view key, std::string_view value);
     Result<std::int64_t> push_right_text(std::string_view key, std::string_view value);
+    Result<std::int64_t> push_texts(std::string_view key, std::span<const std::string_view> values,
+                                    bool front);
     Result<std::optional<Value>> pop_left(std::string_view key);
     Result<std::optional<Value>> pop_right(std::string_view key);
     Result<std::int64_t> list_length(std::string_view key);
@@ -78,6 +84,8 @@ class Database
     Result<std::int64_t> hash_set(std::string_view key, std::string_view field, Value value);
     Result<std::int64_t> hash_set_text(std::string_view key, std::string_view field,
                                        std::string_view value);
+    Result<std::int64_t> hash_set_texts(std::string_view key,
+                                        std::span<const std::string_view> fields);
     Result<std::optional<Value>> hash_get(std::string_view key, std::string_view field);
     Result<std::optional<ValueView>> hash_field(std::string_view key, std::string_view field);
     Result<bool> hash_del(std::string_view key, std::string_view field);
@@ -93,6 +101,7 @@ class Database
 
     void open_wal(const std::filesystem::path &path, WalSync sync = WalSync::everysec);
     void flush_wal();
+    void compact_wal();
     void begin_wal_batch()
     {
         if (wal_) wal_->begin_batch();
@@ -308,9 +317,31 @@ class Database
         return node_body(node) + sizeof(ListBody);
     }
 
-    static std::unordered_map<std::string, Value> *promoted_hash(const Node &node) noexcept
+    struct StringHash
     {
-        std::unordered_map<std::string, Value> *table = nullptr;
+        using is_transparent = void;
+        std::size_t operator()(std::string_view value) const noexcept
+        {
+            return std::hash<std::string_view>{}(value);
+        }
+    };
+    using HashValue = std::variant<std::pmr::string, std::int64_t>;
+    using HashTable =
+        std::pmr::unordered_map<std::pmr::string, HashValue, StringHash, std::equal_to<>>;
+    struct HashDelete
+    {
+        std::pmr::memory_resource *memory;
+        void operator()(HashTable *table) const noexcept
+        {
+            std::destroy_at(table);
+            memory->deallocate(table, sizeof(HashTable), alignof(HashTable));
+        }
+    };
+    std::unique_ptr<HashTable, HashDelete> make_hash();
+
+    static HashTable *promoted_hash(const Node &node) noexcept
+    {
+        HashTable *table = nullptr;
         std::memcpy(&table, node_body(node), sizeof(table));
         return table;
     }
@@ -323,7 +354,7 @@ class Database
 
         static ElementInput from(const Value &value) noexcept;
     };
-    static Value input_to_value(const ElementInput &input);
+    HashValue input_to_value(const ElementInput &input);
 
     static std::int64_t steady_ms() noexcept;
     std::int64_t now_ms() const;
@@ -339,6 +370,7 @@ class Database
     void unlink(const Node *node) noexcept;
     void destroy(Node *node) noexcept;
     void erase_node(Node *node) noexcept;
+    void commit_node(Node *old, Node *fresh, bool keep_ttl = true) noexcept;
     void clear_keyspace() noexcept;
     void release_nodes() noexcept;
 
@@ -356,8 +388,9 @@ class Database
         ExpiryClock deadline;
         std::size_t index;
     };
-    std::unordered_map<Node *, Expiry> expiries_;
-    std::vector<Node *> expiry_heap_;
+    MemoryResource memory_;
+    std::pmr::unordered_map<Node *, Expiry> expiries_;
+    std::pmr::vector<Node *> expiry_heap_;
     void clear_expiry(Node &node) noexcept;
     void schedule_expiry(Node &node, ExpiryClock deadline);
     void heap_fix(std::size_t index) noexcept;
@@ -378,17 +411,16 @@ class Database
 
     static bool hash_find(const Node &node, std::string_view field, const char **element,
                           std::size_t *field_stride) noexcept;
-    Node *promote_hash(Node *node);
 
     static std::size_t element_size(const ElementInput &value, bool with_backlen) noexcept;
     static char *write_element(char *out, const ElementInput &value, bool with_backlen) noexcept;
     static Value element_to_value(const pack::Element &element);
-    static ValueView view_of(const Value &value) noexcept;
+    static ValueView view_of(const HashValue &value) noexcept;
     static std::uint32_t grown_capacity(std::uint32_t required, std::uint32_t current) noexcept;
 
     mutable std::shared_mutex mutex_;
     SlabPool pool_;
-    std::vector<Node *> buckets_;
+    std::pmr::vector<Node *> buckets_;
     std::size_t key_total_ = 0;
     std::size_t max_keys_;
     std::size_t tracked_bytes_ = 0;

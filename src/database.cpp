@@ -35,9 +35,12 @@ std::int64_t current_unix_ms()
 
 }
 
-Database::Database(std::size_t max_keys)
-    : buckets_(initial_bucket_count, nullptr), max_keys_(max_keys == 0 ? 1 : max_keys)
+Database::Database(std::size_t max_keys, std::size_t max_memory)
+    : memory_(max_memory), expiries_(&memory_), expiry_heap_(&memory_), pool_(&memory_),
+      buckets_(initial_bucket_count, nullptr, &memory_), max_keys_(max_keys == 0 ? 1 : max_keys)
 {
+    memory_.context = &pool_;
+    memory_.reclaim = [](void *pool) { static_cast<SlabPool *>(pool)->reclaim(); };
 }
 
 Database::~Database()
@@ -53,7 +56,7 @@ void Database::release_nodes() noexcept
         {
             Node *next = node->next;
             if (node_type(*node) == NodeType::hash && (node_flags(*node) & flag_hash_promoted) != 0)
-                delete promoted_hash(*node);
+                HashDelete{&memory_}(promoted_hash(*node));
             if (node_size_class(*node) == oversized_class)
                 pool_.deallocate(node, node_block_size(*node));
             node = next;
@@ -180,7 +183,7 @@ void Database::unlink(const Node *node) noexcept
 void Database::destroy(Node *node) noexcept
 {
     if (node_type(*node) == NodeType::hash && (node_flags(*node) & flag_hash_promoted) != 0)
-        delete promoted_hash(*node);
+        HashDelete{&memory_}(promoted_hash(*node));
 
     const std::size_t block = node_block_size(*node);
     tracked_bytes_ -= block;
@@ -196,6 +199,24 @@ void Database::erase_node(Node *node) noexcept
     --key_total_;
     key_hint_.store(key_total_);
     destroy(node);
+    ++sequence_;
+}
+
+void Database::commit_node(Node *old, Node *fresh, bool keep_ttl) noexcept
+{
+    if (old && keep_ttl && (node_flags(*old) & flag_has_ttl))
+    {
+        auto entry = expiries_.extract(old);
+        expiry_heap_[entry.mapped().index] = fresh;
+        entry.key() = fresh;
+        expiries_.insert(std::move(entry));
+        set_flags(*fresh, static_cast<std::uint8_t>(node_flags(*fresh) | flag_has_ttl));
+    }
+    if (old) erase_node(old);
+    link(fresh);
+    touch(*fresh);
+    ++key_total_;
+    key_hint_.store(key_total_);
     ++sequence_;
 }
 
@@ -331,7 +352,7 @@ void Database::maybe_rehash()
 
 void Database::rehash(std::size_t new_bucket_count)
 {
-    std::vector<Node *> fresh(new_bucket_count, nullptr);
+    std::pmr::vector<Node *> fresh(new_bucket_count, nullptr, &memory_);
     const std::size_t mask = new_bucket_count - 1;
     for (Node *node : buckets_)
     {
@@ -409,13 +430,7 @@ void Database::set(std::string_view key, std::string_view val)
         if (!val.empty()) std::memcpy(node_body(*pending), val.data(), val.size());
         pending->count = static_cast<std::uint32_t>(val.size());
         log(WalOp::set, {key, val});
-        if (node) erase_node(node);
-        node = pending.release();
-        link(node);
-        touch(*node);
-        ++key_total_;
-        key_hint_.store(key_total_);
-        ++sequence_;
+        commit_node(node, pending.release(), false);
         return;
     }
 
@@ -532,10 +547,13 @@ Result<std::int64_t> Database::increment(std::string_view key)
     Node *node = find_writable(key);
     if (node == nullptr)
     {
+        maybe_rehash();
+        auto cleanup = [this](Node *pending) { destroy(pending); };
+        std::unique_ptr<Node, decltype(cleanup)> pending(
+            create_node(key, NodeType::integer, sizeof(std::int64_t)), cleanup);
+        set_integer_value(*pending, 1);
         log(WalOp::increment, {key});
-        node =
-            insert_node(key, NodeType::integer, static_cast<std::uint32_t>(sizeof(std::int64_t)));
-        set_integer_value(*node, 1);
+        commit_node(nullptr, pending.release());
         return 1;
     }
 
@@ -559,9 +577,9 @@ Result<std::int64_t> Database::increment(std::string_view key)
         current == std::numeric_limits<std::int64_t>::max())
         return std::unexpected(Error{ErrorCode::value_not_integer});
 
-    log(WalOp::increment, {key});
     if (node_body_capacity(*node) < sizeof(std::int64_t))
         node = grow_node(node, sizeof(std::int64_t));
+    log(WalOp::increment, {key});
     set_type(*node, NodeType::integer);
     node->count = 0;
     set_integer_value(*node, current + 1);
@@ -597,10 +615,10 @@ Database::ElementInput Database::ElementInput::from(const Value &value) noexcept
     return input;
 }
 
-Value Database::input_to_value(const ElementInput &input)
+Database::HashValue Database::input_to_value(const ElementInput &input)
 {
-    if (input.is_integer) return Value{input.integer};
-    return Value{std::string{input.text}};
+    if (input.is_integer) return HashValue{input.integer};
+    return HashValue{std::pmr::string{input.text, &memory_}};
 }
 
 Value Database::element_to_value(const pack::Element &element)
@@ -652,13 +670,16 @@ Result<std::int64_t> Database::list_push(std::string_view key, const ElementInpu
     if (element_size(value, true) > 64 * 1024 * 1024)
         return std::unexpected(Error{ErrorCode::request_too_large});
     const auto integer = value.is_integer ? std::to_string(value.integer) : std::string{};
-    log(front ? WalOp::push_left : WalOp::push_right,
-        {key, value.is_integer ? "i" : "s",
-         value.is_integer ? std::string_view(integer) : value.text});
+    auto cleanup = [this](Node *pending)
+    {
+        if (pending) destroy(pending);
+    };
+    std::unique_ptr<Node, decltype(cleanup)> pending(nullptr, cleanup);
     if (node == nullptr)
     {
-        node = insert_node(key, NodeType::list,
-                           static_cast<std::uint32_t>(sizeof(ListBody) + encoded));
+        maybe_rehash();
+        pending.reset(create_node(key, NodeType::list, sizeof(ListBody) + encoded));
+        node = pending.get();
         list_body(*node)->head = 0;
         list_body(*node)->used = 0;
     }
@@ -669,6 +690,10 @@ Result<std::int64_t> Database::list_push(std::string_view key, const ElementInpu
 
     const bool use_front = front && node->count != 0;
     node = list_reserve(node, use_front ? encoded : 0, use_front ? 0 : encoded);
+    log(front ? WalOp::push_left : WalOp::push_right,
+        {key, value.is_integer ? "i" : "s",
+         value.is_integer ? std::string_view(integer) : value.text});
+    if (pending) commit_node(nullptr, pending.release());
 
     ListBody *body = list_body(*node);
     char *run = list_run(*node);
@@ -710,6 +735,52 @@ Result<std::int64_t> Database::push_right_text(std::string_view key, std::string
     ElementInput input;
     input.text = value;
     return list_push(key, input, false);
+}
+
+Result<std::int64_t> Database::push_texts(std::string_view key,
+                                          std::span<const std::string_view> values, bool front)
+{
+    Node *old = find_writable(key);
+    if (old && node_type(*old) != NodeType::list)
+        return std::unexpected(Error{ErrorCode::wrong_type});
+    if (values.empty()) return old ? old->count : 0;
+    std::size_t bytes = old ? list_body(*old)->used : 0;
+    std::size_t largest = 0;
+    for (auto value : values)
+    {
+        if (value.size() > 64 * 1024 * 1024)
+            return std::unexpected(Error{ErrorCode::request_too_large});
+        bytes += pack::encoded_size(value);
+        largest = std::max(largest, value.size());
+        if (bytes > 64 * 1024 * 1024) return std::unexpected(Error{ErrorCode::request_too_large});
+    }
+    if (!old) maybe_rehash();
+    auto cleanup = [this](Node *node) { destroy(node); };
+    std::unique_ptr<Node, decltype(cleanup)> pending(
+        create_node(key, NodeType::list, static_cast<std::uint32_t>(sizeof(ListBody) + bytes)),
+        cleanup);
+    list_body(*pending)->head = 0;
+    list_body(*pending)->used = static_cast<std::uint32_t>(bytes);
+    pending->count = static_cast<std::uint32_t>((old ? old->count : 0) + values.size());
+    char *out = list_run(*pending);
+    if (front)
+        for (auto i = values.size(); i > 0; --i)
+            out = pack::encode(out, values[i - 1]);
+    if (old)
+    {
+        const auto used = list_body(*old)->used;
+        std::memcpy(out, list_run(*old) + list_body(*old)->head, used);
+        out += used;
+    }
+    if (!front)
+        for (auto value : values)
+            out = pack::encode(out, value);
+    if (wal_ && !replaying_) wal_->reserve_record(key.size() + largest + 64);
+    for (auto value : values)
+        log(front ? WalOp::push_left : WalOp::push_right, {key, "s", value});
+    const auto count = pending->count;
+    commit_node(old, pending.release());
+    return count;
 }
 
 Result<std::optional<Value>> Database::list_pop(std::string_view key, bool front)
@@ -781,7 +852,7 @@ Result<std::int64_t> Database::list_length(std::string_view key)
     return static_cast<std::int64_t>(node->count);
 }
 
-ValueView Database::view_of(const Value &value) noexcept
+ValueView Database::view_of(const HashValue &value) noexcept
 {
     ValueView view;
     if (const auto *integer = std::get_if<std::int64_t>(&value))
@@ -791,7 +862,7 @@ ValueView Database::view_of(const Value &value) noexcept
         return view;
     }
     view.kind = ValueView::Kind::string;
-    view.text = std::get<std::string>(value);
+    view.text = std::get<std::pmr::string>(value);
     return view;
 }
 
@@ -819,152 +890,144 @@ bool Database::hash_find(const Node &node, std::string_view field, const char **
     return false;
 }
 
-Database::Node *Database::promote_hash(Node *node)
+std::unique_ptr<Database::HashTable, Database::HashDelete> Database::make_hash()
 {
-    using Table = std::unordered_map<std::string, Value>;
-
-    auto table = std::make_unique<Table>();
-    table->reserve(hash_count(*node) + 1);
-
-    const char *cursor = node_body(*node);
-    const std::uint32_t count = hash_count(*node);
-    for (std::uint32_t index = 0; index < count; ++index)
+    void *storage = memory_.allocate(sizeof(HashTable), alignof(HashTable));
+    try
     {
-        const auto field = pack::decode(cursor);
-        cursor += pack::element_size(cursor);
-        const auto value = pack::decode(cursor);
-        cursor += pack::element_size(cursor);
-        table->emplace(std::string{field.text}, element_to_value(value));
+        return {new (storage) HashTable(&memory_), HashDelete{&memory_}};
     }
-
-    node = grow_node(node, static_cast<std::uint32_t>(sizeof(Table *)));
-    set_flags(*node, static_cast<std::uint8_t>(node_flags(*node) | flag_hash_promoted));
-    node->count = static_cast<std::uint32_t>(table->size());
-    Table *raw = table.release();
-    std::memcpy(node_body(*node), &raw, sizeof(raw));
-    return node;
+    catch (...)
+    {
+        memory_.deallocate(storage, sizeof(HashTable), alignof(HashTable));
+        throw;
+    }
 }
 
 Result<std::int64_t> Database::hash_assign(std::string_view key, std::string_view field,
                                            const ElementInput &value)
 {
     Node *node = find_writable(key);
-    if (node != nullptr && node_type(*node) != NodeType::hash)
+    if (node && node_type(*node) != NodeType::hash)
         return std::unexpected(Error{ErrorCode::wrong_type});
-
     if (field.size() > 64 * 1024 * 1024 || element_size(value, false) > 64 * 1024 * 1024)
         return std::unexpected(Error{ErrorCode::request_too_large});
     const auto integer = value.is_integer ? std::to_string(value.integer) : std::string{};
-    log(WalOp::hash_set, {key, field, value.is_integer ? "i" : "s",
-                          value.is_integer ? std::string_view(integer) : value.text});
-    const auto field_bytes = static_cast<std::uint32_t>(pack::body_size(field));
-    const auto value_bytes = static_cast<std::uint32_t>(element_size(value, false));
-
-    if (node == nullptr)
+    auto append = [&]
     {
-        if (field_bytes + value_bytes > hash_packed_byte_limit)
-        {
-            auto table = std::make_unique<std::unordered_map<std::string, Value>>();
-            table->emplace(std::string(field), input_to_value(value));
-            node = insert_node(key, NodeType::hash, sizeof(void *));
-            set_flags(*node, flag_hash_promoted);
-            node->count = 1;
-            auto *raw = table.release();
-            std::memcpy(node_body(*node), &raw, sizeof(raw));
-            return 1;
-        }
-        node = insert_node(key, NodeType::hash, field_bytes + value_bytes);
-        char *out = pack::encode_body(node_body(*node), field);
-        write_element(out, value, false);
-        set_hash_count(*node, 1);
-        set_hash_used(*node, field_bytes + value_bytes);
-        return 1;
-    }
-
-    touch(*node);
-
-    if ((node_flags(*node) & flag_hash_promoted) != 0)
+        log(WalOp::hash_set, {key, field, value.is_integer ? "i" : "s",
+                              value.is_integer ? std::string_view(integer) : value.text});
+    };
+    if (node && (node_flags(*node) & flag_hash_promoted))
     {
         auto *table = promoted_hash(*node);
-        auto existing = table->find(std::string{field});
-        const bool inserted = existing == table->end();
-        if (inserted)
+        auto existing = table->find(field);
+        auto stored = input_to_value(value);
+        if (existing != table->end())
         {
-            table->emplace(std::string{field}, input_to_value(value));
-            node->count = static_cast<std::uint32_t>(table->size());
-        }
-        else
-        {
-            existing->second = input_to_value(value);
-        }
-        ++sequence_;
-        return inserted ? 1 : 0;
-    }
-
-    const char *value_element = nullptr;
-    std::size_t field_stride = 0;
-
-    if (hash_find(*node, field, &value_element, &field_stride))
-    {
-        const std::size_t old_value_bytes = pack::element_size(value_element);
-        const auto delta =
-            static_cast<std::ptrdiff_t>(value_bytes) - static_cast<std::ptrdiff_t>(old_value_bytes);
-
-        if (delta > 0 &&
-            hash_used(*node) + static_cast<std::size_t>(delta) > hash_packed_byte_limit)
-        {
-            node = promote_hash(node);
-            auto *table = promoted_hash(*node);
-            table->find(std::string(field))->second = input_to_value(value);
+            append();
+            existing->second = std::move(stored);
             ++sequence_;
             return 0;
         }
-        if (delta != 0)
-        {
-            const std::uint32_t used = hash_used(*node);
-            if (delta > 0 && used + static_cast<std::uint32_t>(delta) > node_body_capacity(*node))
-            {
-                node = grow_node(node, grown_capacity(used + static_cast<std::uint32_t>(delta),
-                                                      node_body_capacity(*node)));
-                hash_find(*node, field, &value_element, &field_stride);
-            }
-
-            auto *target = const_cast<char *>(value_element);
-            const std::size_t offset = static_cast<std::size_t>(target - node_body(*node));
-            const std::size_t tail = used - offset - old_value_bytes;
-            if (tail != 0) std::memmove(target + value_bytes, target + old_value_bytes, tail);
-            set_hash_used(*node, static_cast<std::uint32_t>(used + delta));
-        }
-
-        write_element(const_cast<char *>(value_element), value, false);
-        ++sequence_;
-        return 0;
-    }
-
-    const std::uint32_t used = hash_used(*node);
-    const std::uint32_t needed = used + field_bytes + value_bytes;
-    const std::uint32_t count = hash_count(*node) + 1;
-
-    if (count > hash_packed_limit || needed > hash_packed_byte_limit)
-    {
-        node = promote_hash(node);
-        auto *table = promoted_hash(*node);
-        table->emplace(std::string{field}, input_to_value(value));
+        HashTable prepared(&memory_);
+        prepared.emplace(std::pmr::string(field, &memory_), std::move(stored));
+        auto entry = prepared.extract(prepared.begin());
+        if (table->size() >= table->bucket_count()) table->reserve(table->size() + 1);
+        append();
+        table->insert(std::move(entry));
         node->count = static_cast<std::uint32_t>(table->size());
         ++sequence_;
         return 1;
     }
-
-    if (needed > node_body_capacity(*node))
-        node = grow_node(node, grown_capacity(needed, node_body_capacity(*node)));
-
-    char *out = node_body(*node) + used;
-    char *end = pack::encode_body(out, field);
-    write_element(end, value, false);
+    const auto field_bytes = static_cast<std::uint32_t>(pack::body_size(field));
+    const auto value_bytes = static_cast<std::uint32_t>(element_size(value, false));
+    const char *element = nullptr;
+    std::size_t field_stride = 0;
+    const bool existing = node && hash_find(*node, field, &element, &field_stride);
+    const auto old_bytes = existing ? pack::element_size(element) : 0;
+    const auto used = node ? hash_used(*node) : 0;
+    const auto needed =
+        static_cast<std::uint32_t>(used - old_bytes + value_bytes + (existing ? 0 : field_bytes));
+    const auto count = (node ? hash_count(*node) : 0) + (existing ? 0 : 1);
+    if (!node) maybe_rehash();
+    auto cleanup = [this](Node *pending) { destroy(pending); };
+    if (count > hash_packed_limit || needed > hash_packed_byte_limit)
+    {
+        auto table = make_hash();
+        table->reserve(count);
+        const char *cursor = node ? node_body(*node) : nullptr;
+        for (std::uint32_t i = 0; node && i < hash_count(*node); ++i)
+        {
+            const auto name = pack::decode(cursor);
+            cursor += pack::element_size(cursor);
+            const auto item = pack::decode(cursor);
+            cursor += pack::element_size(cursor);
+            HashValue stored = item.is_integer() ? HashValue{item.integer}
+                                                 : HashValue{std::pmr::string(item.text, &memory_)};
+            table->emplace(std::pmr::string(name.text, &memory_), std::move(stored));
+        }
+        table->insert_or_assign(std::pmr::string(field, &memory_), input_to_value(value));
+        std::unique_ptr<Node, decltype(cleanup)> pending(
+            create_node(key, NodeType::hash, sizeof(void *)), cleanup);
+        auto *raw = table.release();
+        std::memcpy(node_body(*pending), &raw, sizeof(raw));
+        set_flags(*pending, flag_hash_promoted);
+        pending->count = count;
+        append();
+        commit_node(node, pending.release());
+        return existing ? 0 : 1;
+    }
+    if (!node || needed > node_body_capacity(*node))
+    {
+        std::unique_ptr<Node, decltype(cleanup)> pending(
+            create_node(key, NodeType::hash,
+                        grown_capacity(needed, node ? node_body_capacity(*node) : 0)),
+            cleanup);
+        char *out = node_body(*pending);
+        if (existing)
+        {
+            const auto prefix = static_cast<std::size_t>(element - node_body(*node));
+            std::memcpy(out, node_body(*node), prefix);
+            write_element(out + prefix, value, false);
+            std::memcpy(out + prefix + value_bytes, element + old_bytes, used - prefix - old_bytes);
+        }
+        else
+        {
+            if (used) std::memcpy(out, node_body(*node), used);
+            write_element(pack::encode_body(out + used, field), value, false);
+        }
+        set_hash_count(*pending, count);
+        set_hash_used(*pending, needed);
+        append();
+        commit_node(node, pending.release());
+        return existing ? 0 : 1;
+    }
+    std::pmr::string saved(&memory_);
+    ElementInput input = value;
+    if (!value.is_integer &&
+        reinterpret_cast<std::uintptr_t>(value.text.data()) >=
+            reinterpret_cast<std::uintptr_t>(node) &&
+        reinterpret_cast<std::uintptr_t>(value.text.data()) <
+            reinterpret_cast<std::uintptr_t>(node) + node_block_size(*node))
+    {
+        saved = value.text;
+        input.text = saved;
+    }
+    append();
+    if (existing)
+    {
+        auto *out = const_cast<char *>(element);
+        const auto tail = used - static_cast<std::size_t>(element - node_body(*node)) - old_bytes;
+        if (tail && value_bytes != old_bytes)
+            std::memmove(out + value_bytes, element + old_bytes, tail);
+        write_element(out, input, false);
+    }
+    else write_element(pack::encode_body(node_body(*node) + used, field), input, false);
     set_hash_count(*node, count);
     set_hash_used(*node, needed);
     ++sequence_;
-    return 1;
+    return existing ? 0 : 1;
 }
 
 Result<std::int64_t> Database::hash_set(std::string_view key, std::string_view field, Value value)
@@ -980,6 +1043,92 @@ Result<std::int64_t> Database::hash_set_text(std::string_view key, std::string_v
     return hash_assign(key, field, input);
 }
 
+Result<std::int64_t> Database::hash_set_texts(std::string_view key,
+                                              std::span<const std::string_view> fields)
+{
+    if (fields.size() % 2) return std::unexpected(Error{ErrorCode::wrong_argument_count});
+    Node *old = find_writable(key);
+    if (old && node_type(*old) != NodeType::hash)
+        return std::unexpected(Error{ErrorCode::wrong_type});
+    if (fields.empty()) return 0;
+    auto table = make_hash();
+    if (old && (node_flags(*old) & flag_hash_promoted))
+    {
+        for (const auto &[field, value] : *promoted_hash(*old))
+        {
+            const auto *integer = std::get_if<std::int64_t>(&value);
+            table->emplace(
+                std::pmr::string(field, &memory_),
+                integer ? HashValue{*integer}
+                        : HashValue{std::pmr::string(std::get<std::pmr::string>(value), &memory_)});
+        }
+    }
+    else if (old)
+    {
+        const char *cursor = node_body(*old);
+        for (std::uint32_t i = 0; i < hash_count(*old); ++i)
+        {
+            const auto field = pack::decode(cursor);
+            cursor += pack::element_size(cursor);
+            const auto value = pack::decode(cursor);
+            cursor += pack::element_size(cursor);
+            table->emplace(std::pmr::string(field.text, &memory_),
+                           value.is_integer() ? HashValue{value.integer}
+                                              : HashValue{std::pmr::string(value.text, &memory_)});
+        }
+    }
+    std::int64_t added = 0;
+    std::size_t largest = 0;
+    for (std::size_t i = 0; i < fields.size(); i += 2)
+    {
+        if (fields[i].size() > 64 * 1024 * 1024 || fields[i + 1].size() > 64 * 1024 * 1024)
+            return std::unexpected(Error{ErrorCode::request_too_large});
+        added += table
+                     ->insert_or_assign(std::pmr::string(fields[i], &memory_),
+                                        HashValue{std::pmr::string(fields[i + 1], &memory_)})
+                     .second;
+        largest = std::max(largest, fields[i].size() + fields[i + 1].size());
+    }
+    std::size_t bytes = 0;
+    for (const auto &[field, value] : *table)
+        bytes +=
+            pack::body_size(field) + (std::holds_alternative<std::int64_t>(value)
+                                          ? pack::body_size(std::get<std::int64_t>(value))
+                                          : pack::body_size(std::get<std::pmr::string>(value)));
+    const bool promoted = table->size() > hash_packed_limit || bytes > hash_packed_byte_limit;
+    if (!old) maybe_rehash();
+    auto cleanup = [this](Node *node) { destroy(node); };
+    std::unique_ptr<Node, decltype(cleanup)> pending(
+        create_node(key, NodeType::hash,
+                    promoted ? sizeof(void *) : static_cast<std::uint32_t>(bytes)),
+        cleanup);
+    if (promoted)
+    {
+        auto *raw = table.release();
+        std::memcpy(node_body(*pending), &raw, sizeof(raw));
+        set_flags(*pending, flag_hash_promoted);
+        pending->count = static_cast<std::uint32_t>(raw->size());
+    }
+    else
+    {
+        char *out = node_body(*pending);
+        for (const auto &[field, value] : *table)
+        {
+            out = pack::encode_body(out, field);
+            if (const auto *integer = std::get_if<std::int64_t>(&value))
+                out = pack::encode_body(out, *integer);
+            else out = pack::encode_body(out, std::get<std::pmr::string>(value));
+        }
+        set_hash_count(*pending, static_cast<std::uint32_t>(table->size()));
+        set_hash_used(*pending, static_cast<std::uint32_t>(bytes));
+    }
+    if (wal_ && !replaying_) wal_->reserve_record(key.size() + largest + 64);
+    for (std::size_t i = 0; i < fields.size(); i += 2)
+        log(WalOp::hash_set, {key, fields[i], "s", fields[i + 1]});
+    commit_node(old, pending.release());
+    return added;
+}
+
 Result<std::optional<ValueView>> Database::hash_field(std::string_view key, std::string_view field)
 {
     Node *node = find_active(key);
@@ -989,7 +1138,7 @@ Result<std::optional<ValueView>> Database::hash_field(std::string_view key, std:
     if ((node_flags(*node) & flag_hash_promoted) != 0)
     {
         const auto *table = promoted_hash(*node);
-        const auto found = table->find(std::string{field});
+        const auto found = table->find(field);
         if (found == table->end()) return std::nullopt;
         return view_of(found->second);
     }
@@ -1031,7 +1180,7 @@ Result<bool> Database::hash_del(std::string_view key, std::string_view field)
     if ((node_flags(*node) & flag_hash_promoted) != 0)
     {
         auto *table = promoted_hash(*node);
-        auto entry = table->find(std::string(field));
+        auto entry = table->find(field);
         if (entry == table->end()) return false;
         log(WalOp::hash_del, {key, field});
         table->erase(entry);
@@ -1092,8 +1241,19 @@ bool Database::expire(std::string_view key, std::int64_t seconds)
     const auto deadline = now + seconds * 1000;
     const auto wall = current_unix_ms() + seconds * 1000;
     const auto stamp = std::to_string(wall);
-    log(WalOp::expire_at, {key, stamp});
+    auto entry = expiries_.find(node);
+    const auto previous = entry == expiries_.end() ? -1 : entry->second.deadline;
     schedule_expiry(*node, deadline);
+    try
+    {
+        log(WalOp::expire_at, {key, stamp});
+    }
+    catch (...)
+    {
+        if (previous < 0) clear_expiry(*node);
+        else schedule_expiry(*node, previous);
+        throw;
+    }
     ++sequence_;
     return true;
 }
@@ -1156,9 +1316,9 @@ DatabaseStats Database::stats() const
                 active += sizeof(*table) + table->bucket_count() * sizeof(void *);
                 for (const auto &[field, value] : *table)
                 {
-                    active += sizeof(std::pair<const std::string, Value>) + 2 * sizeof(void *) +
-                              field.capacity() + 1;
-                    if (auto *text = std::get_if<std::string>(&value))
+                    active += sizeof(std::pair<const std::pmr::string, HashValue>) +
+                              2 * sizeof(void *) + field.capacity() + 1;
+                    if (auto *text = std::get_if<std::pmr::string>(&value))
                         active += text->capacity() + 1;
                 }
             }
@@ -1175,7 +1335,9 @@ DatabaseStats Database::stats() const
             wal_ ? wal_->bytes() : 0,
             evictions_,
             expired_keys_,
-            active + pool_.reserved_bytes() - std::min(slab_live, pool_.reserved_bytes())};
+            active + pool_.reserved_bytes() - std::min(slab_live, pool_.reserved_bytes()),
+            memory_.used(),
+            memory_.limit()};
 }
 
 void Database::log(WalOp op, std::initializer_list<std::string_view> args)
@@ -1185,6 +1347,83 @@ void Database::log(WalOp op, std::initializer_list<std::string_view> args)
 void Database::flush_wal()
 {
     if (wal_) wal_->flush();
+}
+void Database::compact_wal()
+{
+    std::unique_lock guard(mutex_);
+    if (!wal_) throw Error{ErrorCode::disk_write_failed};
+    remove_expired_locked(no_expiry_limit);
+    const auto steady = now_ms();
+    const auto wall = current_unix_ms();
+    wal_->compact(
+        [&](Wal &replacement)
+        {
+            for (const auto *node = lru_tail_; node; node = node->lru_previous)
+            {
+                const std::string_view key(node_key(*node), node_key_length(*node));
+                if (node_type(*node) == NodeType::string)
+                    replacement.append(WalOp::set, {key, string_value(*node)});
+                else if (node_type(*node) == NodeType::integer)
+                {
+                    const auto value = std::to_string(integer_value(*node));
+                    replacement.append(WalOp::integer_set, {key, value});
+                }
+                else if (node_type(*node) == NodeType::list)
+                {
+                    const char *cursor = list_run(*node) + list_body(*node)->head;
+                    for (std::uint32_t i = 0; i < node->count; ++i)
+                    {
+                        const auto item = pack::decode(cursor);
+                        const auto number =
+                            item.is_integer() ? std::to_string(item.integer) : std::string{};
+                        replacement.append(
+                            WalOp::push_right,
+                            {key, item.is_integer() ? "i" : "s",
+                             item.is_integer() ? std::string_view(number) : item.text});
+                        cursor += pack::stride(cursor);
+                    }
+                }
+                else if (node_flags(*node) & flag_hash_promoted)
+                {
+                    for (const auto &[field, item] : *promoted_hash(*node))
+                    {
+                        const auto *integer = std::get_if<std::int64_t>(&item);
+                        const auto number = integer ? std::to_string(*integer) : std::string{};
+                        replacement.append(
+                            WalOp::hash_set,
+                            {key, field, integer ? "i" : "s",
+                             integer ? std::string_view(number)
+                                     : std::string_view(std::get<std::pmr::string>(item))});
+                    }
+                }
+                else
+                {
+                    const char *cursor = node_body(*node);
+                    for (std::uint32_t i = 0; i < hash_count(*node); ++i)
+                    {
+                        const auto field = pack::decode(cursor);
+                        cursor += pack::element_size(cursor);
+                        const auto item = pack::decode(cursor);
+                        cursor += pack::element_size(cursor);
+                        const auto number =
+                            item.is_integer() ? std::to_string(item.integer) : std::string{};
+                        replacement.append(
+                            WalOp::hash_set,
+                            {key, field.text, item.is_integer() ? "i" : "s",
+                             item.is_integer() ? std::string_view(number) : item.text});
+                    }
+                }
+                if (node_flags(*node) & flag_has_ttl)
+                {
+                    const auto deadline = expiries_.find(const_cast<Node *>(node))->second.deadline;
+                    const auto remaining = std::max<std::int64_t>(0, deadline - steady);
+                    if (remaining > std::numeric_limits<std::int64_t>::max() - wall)
+                        throw Error{ErrorCode::value_not_integer};
+                    const auto stamp = std::to_string(wall + remaining);
+                    replacement.append(WalOp::expire_at, {key, stamp});
+                }
+            }
+        });
 }
 void Database::open_wal(const std::filesystem::path &path, WalSync sync)
 {
