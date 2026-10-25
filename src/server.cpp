@@ -24,7 +24,8 @@ bool is_incomplete_resp_error(ErrorCode code)
 }
 
 Server::Server(ServerConfig config)
-    : config(std::move(config)), database(this->config.max_keys), running(false), next_client_id(0)
+    : config(std::move(config)), database(this->config.max_keys, this->config.max_memory),
+      running(false), next_client_id(0)
 {
 }
 
@@ -302,8 +303,18 @@ void Server::execute_batch(ClientInfo &client, std::size_t count, bool has_write
         try
         {
             for (std::size_t index = 0; index < count; ++index)
-                execute_into(client.batch[index], database, stats, client.output_buffer,
-                             client.batch[index].classified_id);
+            {
+                try
+                {
+                    execute_into(client.batch[index], database, stats, client.output_buffer,
+                                 client.batch[index].classified_id);
+                }
+                catch (const std::bad_alloc &)
+                {
+                    append_error(client.output_buffer,
+                                 "OOM database memory limit or allocation failure");
+                }
+            }
         }
         catch (...)
         {

@@ -1,6 +1,7 @@
 #include "resp.hpp"
 #include "error.hpp"
 
+#include <bit>
 #include <charconv>
 #include <cstring>
 #include <functional>
@@ -26,6 +27,23 @@ constexpr std::uint64_t tag_of(const char *text) noexcept
 
 std::uint64_t tag_of(std::string_view name) noexcept
 {
+    if (std::endian::native == std::endian::little)
+    {
+        if (name.size() == 3)
+        {
+            std::uint16_t low;
+            std::memcpy(&low, name.data(), 2);
+            return (std::uint64_t(low) |
+                    (std::uint64_t(static_cast<unsigned char>(name[2])) << 16) | 0x202020ULL) |
+                   (3ULL << 56);
+        }
+        if (name.size() == 4)
+        {
+            std::uint32_t low;
+            std::memcpy(&low, name.data(), 4);
+            return (std::uint64_t(low) | 0x20202020ULL) | (4ULL << 56);
+        }
+    }
     const std::size_t length = name.size() < 8 ? name.size() : 8;
     std::uint64_t tag = 0;
     for (std::size_t index = 0; index < length; ++index)
@@ -85,13 +103,15 @@ void append_info(Database &database, const ServerStats &stats, bool memory_only,
 {
     std::string response;
     response.reserve(512);
+    const auto database_stats = database.stats();
+    response += "owned_memory_bytes:" + std::to_string(database_stats.owned_memory_bytes) + "\r\n";
+    response += "max_memory_bytes:" + std::to_string(database_stats.max_memory_bytes) + "\r\n";
 
     if (!memory_only)
     {
         const auto uptime_seconds = std::chrono::duration_cast<std::chrono::seconds>(
                                         std::chrono::steady_clock::now() - stats.started_at)
                                         .count();
-        const auto database_stats = database.stats();
 
         response += "# Server\r\n";
         response += "uptime_seconds:" + std::to_string(uptime_seconds) + "\r\n";
@@ -114,7 +134,6 @@ void append_info(Database &database, const ServerStats &stats, bool memory_only,
     }
     else
     {
-        const auto database_stats = database.stats();
         response += "# Memory\r\n";
         response +=
             "used_memory_bytes:" + std::to_string(database_stats.approximate_memory_bytes) + "\r\n";
@@ -212,12 +231,16 @@ void execute_list_push(const Command &command, Database &database, const ServerS
     }
 
     Result<std::int64_t> length = std::int64_t{0};
-    for (std::size_t index = 1; index < arguments.size(); ++index)
-    {
-        length = front ? database.push_left_text(arguments[0], arguments[index])
-                       : database.push_right_text(arguments[0], arguments[index]);
-        if (!length) break;
-    }
+    if (arguments.size() > 2)
+        length =
+            database.push_texts(arguments[0], {arguments.begin() + 1, arguments.size() - 1}, front);
+    else
+        for (std::size_t index = 1; index < arguments.size(); ++index)
+        {
+            length = front ? database.push_left_text(arguments[0], arguments[index])
+                           : database.push_right_text(arguments[0], arguments[index]);
+            if (!length) break;
+        }
 
     if (!length)
     {
@@ -283,6 +306,14 @@ void execute_hash_set(const Command &command, Database &database, const ServerSt
     }
 
     std::int64_t added = 0;
+    if (arguments.size() > 3)
+    {
+        const auto result =
+            database.hash_set_texts(arguments[0], {arguments.begin() + 1, arguments.size() - 1});
+        if (!result) append_error(output, error_message(result.error().code()));
+        else append_integer(output, *result);
+        return;
+    }
     for (std::size_t index = 1; index < arguments.size(); index += 2)
     {
         const auto result =

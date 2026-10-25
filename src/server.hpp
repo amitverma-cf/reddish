@@ -23,6 +23,7 @@ struct ServerConfig
 {
     std::uint16_t port = 6379;
     std::size_t max_keys = 1024;
+    std::size_t max_memory = 0;
     std::filesystem::path wal_path;
     WalSync wal_sync = WalSync::everysec;
 };

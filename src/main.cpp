@@ -17,8 +17,9 @@ bool should_stop()
 {
     return stop_requested != 0;
 }
-constexpr const char *usage = "Usage: reddish [port] [--max-keys <count>] [--wal-path <path>] "
-                              "[--wal-sync everysec|always|none] [--no-wal]\n";
+constexpr const char *usage =
+    "Usage: reddish [port] [--max-keys <count>] [--wal-path <path>] "
+    "[--wal-sync everysec|always|none] [--max-memory <bytes>] [--compact-wal] [--no-wal]\n";
 }
 int main(int argc, char *argv[])
 {
@@ -30,6 +31,7 @@ int main(int argc, char *argv[])
         config.wal_path = "reddish.wal";
         bool disable_wal = false;
         bool port_supplied = false;
+        bool compact = false;
         auto number = [](std::string_view text) -> std::optional<std::size_t>
         {
             std::size_t n = 0;
@@ -40,12 +42,18 @@ int main(int argc, char *argv[])
         for (int i = 1; i < argc; ++i)
         {
             const std::string_view flag = argv[i];
+            if (flag == "--compact-wal")
+            {
+                compact = true;
+                continue;
+            }
             if (flag == "--no-wal")
             {
                 disable_wal = true;
                 continue;
             }
-            if (flag == "--max-keys" || flag == "--wal-path" || flag == "--wal-sync")
+            if (flag == "--max-keys" || flag == "--max-memory" || flag == "--wal-path" ||
+                flag == "--wal-sync")
             {
                 if (++i == argc)
                 {
@@ -53,7 +61,7 @@ int main(int argc, char *argv[])
                     return 1;
                 }
                 const std::string_view value = argv[i];
-                if (flag == "--max-keys")
+                if (flag == "--max-keys" || flag == "--max-memory")
                 {
                     auto n = number(value);
                     if (!n)
@@ -61,7 +69,8 @@ int main(int argc, char *argv[])
                         std::cerr << usage;
                         return 1;
                     }
-                    config.max_keys = *n;
+                    if (flag == "--max-keys") config.max_keys = *n;
+                    else config.max_memory = *n;
                 }
                 else if (flag == "--wal-path")
                 {
@@ -94,6 +103,18 @@ int main(int argc, char *argv[])
             }
         }
         if (disable_wal) config.wal_path.clear();
+        if (compact)
+        {
+            if (disable_wal || !std::filesystem::exists(config.wal_path))
+            {
+                std::cerr << usage;
+                return 1;
+            }
+            reddish::Database database(config.max_keys, config.max_memory);
+            database.open_wal(config.wal_path, config.wal_sync);
+            database.compact_wal();
+            return 0;
+        }
         reddish::Server server(config);
         server.start(should_stop);
     }
