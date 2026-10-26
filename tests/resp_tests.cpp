@@ -9,6 +9,27 @@
 
 using namespace reddish;
 
+TEST_CASE("RESP argument storage handles overflow reuse and oversized declared counts")
+{
+    Command parsed;
+    std::string frame = "*41\r\n$3\r\nSET\r\n";
+    for (int i = 0; i < 40; ++i)
+        frame += "$1\r\na\r\n";
+    REQUIRE(parse_command_into(frame, parsed));
+    CHECK(parsed.arguments.size() == 40);
+    for (const auto value : parsed.arguments)
+        CHECK(value == "a");
+    REQUIRE(parse_command_into("*2\r\n$3\r\nGET\r\n$1\r\nk\r\n", parsed));
+    REQUIRE(parsed.arguments.size() == 1);
+    CHECK(parsed.arguments[0] == "k");
+    CHECK_FALSE(parse_command_into("*18446744073709551615\r\n", parsed));
+    const std::string binary = std::string("*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$3\r\na\0b\r\n", 29);
+    for (std::size_t i = 0; i < binary.size(); ++i)
+        CHECK_FALSE(parse_command_into(std::string_view(binary).substr(0, i), parsed));
+    REQUIRE(parse_command_into(binary, parsed));
+    CHECK(parsed.arguments[1] == std::string_view("a\0b", 3));
+}
+
 namespace
 {
 

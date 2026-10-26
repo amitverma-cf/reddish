@@ -14,6 +14,7 @@ import zlib
 
 parser = argparse.ArgumentParser()
 parser.add_argument('binary'); parser.add_argument('--redis', action='store_true')
+parser.add_argument('--seed', type=int, default=731); parser.add_argument('--operations', type=int, default=2000)
 options = parser.parse_args()
 
 def request(*args):
@@ -21,12 +22,12 @@ def request(*args):
     return b'*%d\r\n' % len(args) + b''.join(b'$%d\r\n' % len(a) + a + b'\r\n' for a in args)
 
 class Process:
-    def __init__(self, root, flags=(), redis=False):
+    def __init__(self, root, flags=(), redis=False, env=None):
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0)); self.port = sock.getsockname()[1]
         self.log = open(Path(root) / f'{self.port}.log', 'wb')
         args = ['redis-server', '--port', str(self.port), '--save', '', '--appendonly', 'no'] if redis else [options.binary, str(self.port), *flags]
-        self.process = subprocess.Popen(args, stdout=self.log, stderr=self.log)
+        self.process = subprocess.Popen(args, stdout=self.log, stderr=self.log, env={**os.environ, **(env or {})})
         self.sock = None
         for _ in range(200):
             if self.process.poll() is not None: raise RuntimeError(f'server exited; see {self.log.name}')
@@ -63,8 +64,8 @@ class Integration(unittest.TestCase):
     def tearDown(self):
         for server in self.servers: server.close()
         self.temp.cleanup()
-    def start(self, flags=('--no-wal',), redis=False):
-        server = Process(self.temp.name, flags, redis); self.servers.append(server); return server
+    def start(self, flags=('--no-wal',), redis=False, env=None):
+        server = Process(self.temp.name, flags, redis, env); self.servers.append(server); return server
     def test_capacity_and_expiry(self):
         server = self.start(('--no-wal', '--max-keys', '1'))
         self.assertEqual(server.command('SET', 'k', 'v'), b'OK'); time.sleep(.1)
@@ -131,16 +132,67 @@ class Integration(unittest.TestCase):
         self.assertEqual(server.command('LPOP', 'list'), b'one')
         self.assertEqual(server.command('LPOP', 'list'), b'7')
         self.assertEqual(server.command('GET', 'binary'), b'zero\x00line\r\n')
+
+    def test_byte_limit_preserves_targets_and_pipeline_service(self):
+        server = self.start(('--no-wal', '--max-keys', '10000', '--max-memory', '300000'))
+        self.assertEqual(server.command('SET', 'target', 'original'), b'OK')
+        self.assertEqual(server.command('EXPIRE', 'target', 60), 1)
+        large = b'x' * 400000
+        server.sock.sendall(request('SET', 'target', large) + request('PING'))
+        self.assertTrue(server.reply()[1].startswith(b'OOM'))
+        self.assertEqual(server.reply(), b'PONG')
+        self.assertEqual(server.command('GET', 'target'), b'original')
+        self.assertGreaterEqual(server.command('TTL', 'target'), 0)
+        self.assertEqual(server.command('RPUSH', 'list', 'original'), 1)
+        self.assertTrue(server.command('RPUSH', 'list', 'small', large)[1].startswith(b'OOM'))
+        self.assertEqual(server.command('LLEN', 'list'), 1)
+        self.assertEqual(server.command('HSET', 'hash', 'old', 'value'), 1)
+        self.assertTrue(server.command('HSET', 'hash', 'new', 'small', 'large', large)[1].startswith(b'OOM'))
+        self.assertEqual(server.command('HLEN', 'hash'), 1)
+        stats = dict(line.split(b':', 1) for line in server.command('INFO', 'memory').split(b'\r\n') if b':' in line)
+        self.assertLessEqual(int(stats[b'owned_memory_bytes']), 300000)
+        self.assertEqual(int(stats[b'max_memory_bytes']), 300000)
     @unittest.skipUnless(options.redis and shutil.which('redis-server'), 'optional Redis differential comparison')
     def test_differential_commands(self):
         target, baseline = self.start(), self.start(redis=True)
-        rng = random.Random(731)
-        for _ in range(2000):
+        rng = random.Random(options.seed)
+        for _ in range(options.operations):
             n = rng.randrange(20); value = rng.randbytes(rng.randrange(150))
             commands = [('SET', f's{n}', value), ('GET', f's{n}'), ('INCR', f'i{n}'), ('DEL', f's{n}'),
                         ('LPUSH', f'l{n}', value), ('RPUSH', f'l{n}', value), ('LPOP', f'l{n}'), ('RPOP', f'l{n}'), ('LLEN', f'l{n}'),
                         ('HSET', f'h{n}', f'f{rng.randrange(15)}', value), ('HGET', f'h{n}', 'f3'), ('HDEL', f'h{n}', 'f3'), ('HLEN', f'h{n}')]
             command = rng.choice(commands)
             self.assertEqual(target.command(*command), baseline.command(*command), command)
+
+    @unittest.skipUnless(os.environ.get('REDDISH_FAULT_SHIM') and not os.environ.get('ASAN_OPTIONS') and not os.environ.get('TSAN_OPTIONS'), 'requires plain Linux fault shim')
+    def test_wal_write_failures_preserve_acknowledged_values(self):
+        for fault in ('fwrite', 'fflush', 'fdatasync'):
+            with self.subTest(fault=fault):
+                wal = Path(self.temp.name) / f'{fault}.wal'; trigger = Path(self.temp.name) / f'{fault}.trigger'
+                env = {'LD_PRELOAD': os.environ['REDDISH_FAULT_SHIM'], 'REDDISH_FAULT': fault, 'REDDISH_FAULT_TRIGGER': str(trigger), 'REDDISH_FAULT_WAL': str(wal)}
+                server = self.start(('--wal-path', str(wal), '--wal-sync', 'always'), env=env)
+                self.assertEqual(server.command('SET', 'ack', 'durable'), b'OK')
+                trigger.touch()
+                with self.assertRaises((EOFError, OSError)): server.command('SET', 'unack', 'maybe')
+                self.assertNotEqual(server.process.wait(timeout=10), 0)
+                server.close()
+                recovered = self.start(('--wal-path', str(wal)))
+                self.assertEqual(recovered.command('GET', 'ack'), b'durable')
+                recovered.close()
+
+    @unittest.skipUnless(os.environ.get('REDDISH_FAULT_SHIM') and not os.environ.get('ASAN_OPTIONS') and not os.environ.get('TSAN_OPTIONS'), 'requires plain Linux fault shim')
+    def test_compaction_failures_leave_a_recoverable_generation(self):
+        for fault, nth in (('fwrite', 1), ('fflush', 1), ('fdatasync', 1), ('rename', 1), ('fsync', 2), ('crash-before-rename', 1), ('crash-after-rename', 1)):
+            with self.subTest(fault=fault):
+                wal = Path(self.temp.name) / f'compact-{fault}.wal'; trigger = Path(self.temp.name) / f'compact-{fault}.trigger'
+                server = self.start(('--wal-path', str(wal), '--wal-sync', 'always'))
+                self.assertEqual(server.command('SET', 'ack', 'durable'), b'OK'); server.close()
+                trigger.touch()
+                env = {**os.environ, 'LD_PRELOAD': os.environ['REDDISH_FAULT_SHIM'], 'REDDISH_FAULT': fault, 'REDDISH_FAULT_NTH': str(nth), 'REDDISH_FAULT_TRIGGER': str(trigger), 'REDDISH_FAULT_WAL': str(wal)}
+                result = subprocess.run([options.binary, '--wal-path', str(wal), '--compact-wal'], env=env, capture_output=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(trigger.exists())
+                recovered = self.start(('--wal-path', str(wal)))
+                self.assertEqual(recovered.command('GET', 'ack'), b'durable'); recovered.close()
 
 unittest.main(argv=[__file__], verbosity=2)

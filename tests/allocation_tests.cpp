@@ -22,6 +22,9 @@ struct LogFile
     {
         std::error_code error;
         std::filesystem::remove(path, error);
+        auto lock = path;
+        lock += ".lock";
+        std::filesystem::remove(lock, error);
     }
 };
 
@@ -196,6 +199,37 @@ void operator delete(void *memory, std::size_t) noexcept
 void operator delete[](void *memory, std::size_t) noexcept
 {
     std::free(memory);
+}
+
+void *operator new(std::size_t size, std::align_val_t alignment)
+{
+    const auto align = std::max<std::size_t>(static_cast<std::size_t>(alignment), alignof(void *));
+    auto *raw = static_cast<char *>(::operator new(size + align + sizeof(void *)));
+    const auto address =
+        (reinterpret_cast<std::uintptr_t>(raw + sizeof(void *)) + align - 1) & ~(align - 1);
+    auto *result = reinterpret_cast<void *>(address);
+    reinterpret_cast<void **>(result)[-1] = raw;
+    return result;
+}
+void *operator new[](std::size_t size, std::align_val_t alignment)
+{
+    return ::operator new(size, alignment);
+}
+void operator delete(void *memory, std::align_val_t) noexcept
+{
+    if (memory) ::operator delete(reinterpret_cast<void **>(memory)[-1]);
+}
+void operator delete[](void *memory, std::align_val_t alignment) noexcept
+{
+    ::operator delete(memory, alignment);
+}
+void operator delete(void *memory, std::size_t, std::align_val_t alignment) noexcept
+{
+    ::operator delete(memory, alignment);
+}
+void operator delete[](void *memory, std::size_t, std::align_val_t alignment) noexcept
+{
+    ::operator delete(memory, alignment);
 }
 
 int main()

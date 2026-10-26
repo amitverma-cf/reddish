@@ -16,8 +16,99 @@ struct LogFile
     {
         std::error_code ec;
         std::filesystem::remove(path, ec);
+        auto lock = path;
+        lock += ".lock";
+        std::filesystem::remove(lock, ec);
     }
 };
+}
+TEST_CASE("WAL compaction preserves types collections deadlines and writer exclusion")
+{
+    LogFile log;
+    std::size_t before;
+    {
+        Database db(10000);
+        db.open_wal(log.path, WalSync::always);
+        db.begin_wal_batch();
+        for (int i = 0; i < 1000; ++i)
+            db.set("value", std::to_string(i));
+        REQUIRE(db.increment("integer") == 1);
+        REQUIRE(db.push_right("list", std::int64_t(7)) == 1);
+        REQUIRE(db.push_right_text("list", std::string_view("a\0b", 3)) == 2);
+        REQUIRE(db.hash_set("hash", "n", std::int64_t(42)) == 1);
+        REQUIRE(db.hash_set_text("promoted", "large", std::string(70000, 'x')) == 1);
+        REQUIRE(db.expire("list", 30));
+        db.set("gone", "v");
+        REQUIRE(db.expire("gone", 0));
+        db.end_wal_batch();
+        before = db.stats().wal_bytes;
+        db.compact_wal();
+        CHECK(db.stats().wal_bytes < before);
+        Database other;
+        REQUIRE_THROWS(other.open_wal(log.path));
+        db.set("after", "replacement");
+    }
+    {
+        Database db;
+        db.open_wal(log.path);
+        CHECK(**db.get("value") == "999");
+        CHECK(db.increment("integer") == 2);
+        CHECK(std::get<std::int64_t>(**db.pop_left("list")) == 7);
+        CHECK(std::get<std::string>(**db.pop_left("list")) == std::string("a\0b", 3));
+        CHECK(std::get<std::int64_t>(**db.hash_get("hash", "n")) == 42);
+        CHECK(std::get<std::string>(**db.hash_get("promoted", "large")) == std::string(70000, 'x'));
+        CHECK(!*db.get("gone"));
+        CHECK(**db.get("after") == "replacement");
+    }
+}
+
+TEST_CASE("failed compaction serialization leaves the original WAL writable")
+{
+    LogFile log;
+    {
+        Wal wal(log.path, WalSync::always, [](WalOp, const auto &) {});
+        wal.append(WalOp::set, {"key", "old"});
+        REQUIRE_THROWS(wal.compact(
+            [](Wal &replacement)
+            {
+                replacement.append(WalOp::set, {"key", "incomplete"});
+                throw std::bad_alloc{};
+            }));
+        CHECK_FALSE(wal.failed());
+        wal.append(WalOp::set, {"key", "after"});
+    }
+    Database db;
+    db.open_wal(log.path);
+    CHECK(**db.get("key") == "after");
+}
+
+TEST_CASE("compaction preserves expiry deadlines and LRU order")
+{
+    LogFile log;
+    {
+        Database db;
+        db.open_wal(log.path);
+        db.set("old", "a");
+        db.set("keep", "b");
+        db.set("expires", "c");
+        REQUIRE(db.expire("expires", 1));
+        REQUIRE(db.get("old"));
+        db.compact_wal();
+    }
+    {
+        Database db;
+        db.open_wal(log.path);
+        REQUIRE(db.evict_to(2, 1) == 1);
+        CHECK(!*db.get("keep"));
+        CHECK(**db.get("old") == "a");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+        CHECK(!*db.get("expires"));
+        db.compact_wal();
+    }
+    Database db;
+    db.open_wal(log.path);
+    CHECK(!*db.get("expires"));
+    CHECK(**db.get("old") == "a");
 }
 TEST_CASE("WAL replays every mutation including expiry and LRU eviction")
 {
