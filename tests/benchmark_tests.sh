@@ -8,7 +8,7 @@ source "$ROOT_DIR/benchmarks/common.sh"
 run="$TASK_DIR/samples"
 mkdir -p "$run/temp"
 printf '%040d\n' 0 > "$run/manifest.txt"
-printf 'Measured at test\nKEYS=100 VALUE_BYTES=32 THREADS=1 CLIENTS=1 PIPELINE=1 TRIALS=1 MEMORY_TRIALS=1 RUN_EXTENDED=0 RUN_PERFORMANCE=1 RUN_MEMORY=0 REQUESTS_PER_CLIENT=0\n' >> "$run/manifest.txt"
+printf 'Measured at test\nKEYS=100 VALUE_BYTES=32 THREADS=1 CLIENTS=1 PIPELINE=1 TRIALS=1 DURATION_SECONDS=1 MEMORY_TRIALS=1 RUN_EXTENDED=0 RUN_PERFORMANCE=1 RUN_MEMORY=0 REQUESTS_PER_CLIENT=0\n' >> "$run/manifest.txt"
 printf 'server,workload,trial,ops_per_sec,avg_latency_ms,p50_latency_ms,p99_latency_ms,p999_latency_ms\n' > "$run/results.csv"
 printf 'server,workload,samples,average_ops_per_sec,average_p99_latency_ms,min_ops_per_sec,max_ops_per_sec,stddev_ops_per_sec\n' > "$run/summary.csv"
 printf 'server,workload,trial,cpu_seconds,operation_count,cpu_us_per_op\n' > "$run/cpu.csv"
@@ -54,6 +54,46 @@ for copy in one two; do
 done
 cmp "$TASK_DIR/one-report.md" "$TASK_DIR/two-report.md"
 cmp "$TASK_DIR/one-README.md" "$TASK_DIR/two-README.md"
+grep -q 'client threads: 1, total connections: 1, pipeline: 1' "$TASK_DIR/one-README.md"
+driver="$TASK_DIR/driver"; soak="$TASK_DIR/soak"
+mkdir -p "$driver" "$soak"
+uname -a >> "$run/manifest.txt"
+for directory in "$driver" "$soak"; do
+  printf '%040d\n' 0 > "$directory/revision.txt"
+  uname -a > "$directory/manifest.txt"
+  touch "$directory/complete"
+done
+printf 'TRIALS=1\n' >> "$driver/manifest.txt"
+printf 'server,trial,processes,threads_per_process,pipeline,operations,envelope_ops_per_sec,worst_process_p99_ms,start_spread_ms,client_cpu_pct\n' > "$driver/summary.csv"
+for server in reddish redis valkey; do
+  for point in 1:1 1:2 1:4 4:1; do
+    IFS=: read -r processes threads <<< "$point"
+    for pipeline in 16 64; do
+      stem="$driver/$server-1-p$processes-t$threads-q$pipeline"
+      for ((index=0; index<processes; index++)); do
+        jq --argjson threads "$threads" --argjson clients "$((16/processes/threads))" --argjson pipeline "$pipeline" '.configuration.threads=$threads|.configuration.clients=$clients|.configuration.pipeline=$pipeline|.configuration.key_maximum=100000|.["ALL STATS"].Runtime["Start time"]=0|.["ALL STATS"].Runtime["Finish time"]=1000' "$TASK_DIR/original.json" > "$stem-$index.json"
+        touch "$stem-$index.failed.csv"
+      done
+      printf '%s,1,%s,%s,%s,%s,%s,0.1,0,20\n' "$server" "$processes" "$threads" "$pipeline" "$((processes*1000))" "$((processes*1000))" >> "$driver/summary.csv"
+    done
+  done
+done
+printf 'SOAK_SECONDS=1800\n' >> "$soak/manifest.txt"
+jq '.["ALL STATS"].Runtime["Total duration"]=1800000|.["ALL STATS"].Totals.Count=1800000' "$TASK_DIR/original.json" > "$soak/soak.json"
+touch "$soak/soak.failed.csv"
+printf 'seconds,keys,owned_bytes,rss_kib,expired_keys,evictions\n' > "$soak/memory.csv"
+for ((seconds=0; seconds<=1800; seconds+=5)); do printf '%s,10000,4096,1024,%s,%s\n' "$seconds" "$seconds" "$seconds" >> "$soak/memory.csv"; done
+DRIVER_DIR="$driver" SOAK_DIR="$soak" RESULTS_DIR="$run" OUTPUT_FILE="$TASK_DIR/diagnostics.md" README_FILE='' bash "$ROOT_DIR/benchmarks/publish_results.sh" >/dev/null
+grep -q 'Client driver checks' "$TASK_DIR/diagnostics.md"
+grep -q 'Sustained eviction and expiry' "$TASK_DIR/diagnostics.md"
+cp "$driver/summary.csv" "$TASK_DIR/driver-original.csv"
+awk -F, 'BEGIN{OFS=","}NR==2{$7++}{print}' "$TASK_DIR/driver-original.csv" > "$driver/summary.csv"
+if DRIVER_DIR="$driver" RESULTS_DIR="$run" OUTPUT_FILE="$TASK_DIR/rejected.md" README_FILE='' bash "$ROOT_DIR/benchmarks/publish_results.sh" >/dev/null 2>&1; then echo 'Accepted altered driver statistics' >&2; exit 1; fi
+cp "$TASK_DIR/driver-original.csv" "$driver/summary.csv"
+cp "$soak/memory.csv" "$TASK_DIR/soak-original.csv"
+awk -F, 'BEGIN{OFS=","}NR==2{$3=8388609}{print}' "$TASK_DIR/soak-original.csv" > "$soak/memory.csv"
+if SOAK_DIR="$soak" RESULTS_DIR="$run" OUTPUT_FILE="$TASK_DIR/rejected.md" README_FILE='' bash "$ROOT_DIR/benchmarks/publish_results.sh" >/dev/null 2>&1; then echo 'Accepted exceeded allocation budget' >&2; exit 1; fi
+cp "$TASK_DIR/soak-original.csv" "$soak/memory.csv"
 printf '<!-- benchmark-summary:end -->\n<!-- benchmark-summary:start -->\n' > "$TASK_DIR/bad-README.md"
 if RESULTS_DIR="$run" OUTPUT_FILE="$TASK_DIR/one-report.md" README_FILE="$TASK_DIR/bad-README.md" bash "$ROOT_DIR/benchmarks/publish_results.sh" >/dev/null 2>&1; then echo 'Accepted reversed README markers' >&2; exit 1; fi
 cmp "$TASK_DIR/one-report.md" "$TASK_DIR/two-report.md"

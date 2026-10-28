@@ -46,7 +46,7 @@ Pressure tests check expiry cleanup, LRU eviction, large lists, promoted hashes,
 RESULTS_DIR=local/benchmarks/<run> bash benchmarks/publish_results.sh
 ```
 
-`OUTPUT_FILE` changes the report destination. `README_FILE` changes the README destination; an empty string skips its update. `VALIDATION_DIR`, `CAPACITY_DIR`, `PRESSURE_DIR`, and `WAL_RESULTS_DIR` add completed suites. Validation, capacity, and pressure must reference the same measured revision. Missing measurements are labeled as missing, never shown as zero results.
+`OUTPUT_FILE` changes the report destination. `README_FILE` changes the README destination; an empty string skips its update. `VALIDATION_DIR`, `CAPACITY_DIR`, `PRESSURE_DIR`, `WAL_RESULTS_DIR`, `DRIVER_DIR`, and `SOAK_DIR` add completed suites. Suites must reference the same measured revision and host. Missing measurements are labeled as missing, never shown as zero results.
 
 ## Tools and profiles
 
@@ -58,12 +58,23 @@ export PATH="$PWD/local/benchmark-tools/bin:$PATH"
 bash benchmarks/profile.sh
 bash benchmarks/profile_network.sh build/profile/output/reddish local/benchmarks/tcp-profile
 bash benchmarks/network_profile.sh build/output/reddish local/benchmarks/wal
+bash benchmarks/driver.sh
+bash benchmarks/profile_native.sh
+bash benchmarks/soak.sh
 ```
 
 TCP profiling requires Valgrind. Callgrind reports user instructions, not elapsed time or kernel waits. Separate WAL measurements compare Reddish's sync modes; they do not compare durability performance against Redis or Valkey.
 
+`driver.sh` keeps 16 total connections while comparing one, two, or four threads and four independent client processes. Its throughput uses all operations divided by the envelope of client start/finish times. Worst process p99 is not a pooled percentile. Available CPU slots and SMT topology still limit the driver.
+
+`profile_native.sh` records CPU counters and cycle samples for 32-, 256-, and 4096-byte GETs when perf is available. Strace records socket and wait calls; root may be needed for attachment. Missing hardware counters are recorded as unavailable. Tracing changes timing, and maintenance-thread waits are not main-thread lock contention.
+
+`soak.sh` defaults to 1800 seconds of mixed traffic, eviction and expiry. It checks the 10000-key limit and an 8 MiB database allocation budget while recording RSS. Misses are expected because its key space exceeds its key limit; request errors are rejected. `SOAK_SECONDS` can shorten a local smoke check. Do not describe that shortened run as a thirty-minute soak.
+
 ## GitHub Actions
 
 The [workflow](https://github.com/amitverma-cf/reddish/actions/workflows/benchmark.yml) runs manually for the full current main SHA. It validates commands, selects separate physical cores, compares throughput/memory, sweeps capacity, tests pressure/recovery, and profiles the server. Raw artifacts are retained for 90 days.
+
+The full run also checks independent client processes, captures native CPU/socket diagnostics, and runs the thirty-minute soak. Ordinary CI builds the Clang RESP fuzzer and exercises it for two minutes. Linux process tests inject write, flush, sync, rename, and compaction-crash failures.
 
 After every measurement succeeds, a separate publishing job rebuilds the Markdown from the artifact and checks that it matches the generated files. It commits only README.md and benchmarks/benchmarks.md together. If main changed during the run, publishing fails and preserves the artifact instead of overwriting newer work. The benchmark has no push trigger, so the report commit does not start another benchmark. Reports identify the measured source commit, not the later report commit.

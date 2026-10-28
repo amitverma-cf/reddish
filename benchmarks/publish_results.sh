@@ -20,7 +20,7 @@ if [[ -f "$RESULTS_DIR/provenance.json" ]]; then
   run_url=$(jq -r '.run_url // empty' "$RESULTS_DIR/provenance.json")
 fi
 base_host=$(grep -m1 '^Linux ' "$RESULTS_DIR/manifest.txt" || true)
-for suite in VALIDATION_DIR CAPACITY_DIR PRESSURE_DIR WAL_RESULTS_DIR; do
+for suite in VALIDATION_DIR CAPACITY_DIR PRESSURE_DIR WAL_RESULTS_DIR DRIVER_DIR SOAK_DIR; do
   directory=${!suite:-}
   [[ -n $directory ]] || continue
   marker="$directory/revision.txt"
@@ -32,6 +32,34 @@ for suite in VALIDATION_DIR CAPACITY_DIR PRESSURE_DIR WAL_RESULTS_DIR; do
   suite_host=$(grep -m1 '^Linux ' "$host_file" || true)
   [[ -n $base_host && $suite_host == "$base_host" ]] || { echo "Different or missing measurement host: $suite" >&2; exit 1; }
 done
+if [[ -n ${DRIVER_DIR:-} || -n ${SOAK_DIR:-} ]]; then
+  source "$ROOT_DIR/benchmarks/common.sh"
+  if [[ -n ${DRIVER_DIR:-} ]]; then
+    while IFS=, read -r server trial processes threads pipeline count ops p99 spread cpu; do
+      [[ $server != server ]] || continue
+      [[ $server == reddish || $server == redis || $server == valkey ]] || exit 1
+      stem="$DRIVER_DIR/$server-$trial-p$processes-t$threads-q$pipeline"
+      for ((index=0; index<processes; index++)); do
+        read_stats "$stem-$index.json" reads >/dev/null
+        jq -e --argjson threads "$threads" --argjson clients "$((16/processes/threads))" --argjson pipeline "$pipeline" '.configuration|.threads==$threads and .clients==$clients and .pipeline==$pipeline and .data_size==32 and .key_maximum==100000 and .key_minimum==1' "$stem-$index.json" >/dev/null || exit 1
+      done
+      actual=$(jq -sr '[.[]|.["ALL STATS"]] as $s | ([$s[].Totals.Count]|add) as $n | [$n,$n/((([$s[].Runtime."Finish time"]|max)-([$s[].Runtime."Start time"]|min))/1000),([$s[].Totals["Percentile Latencies"]."p99.00"]|max),([$s[].Runtime."Start time"]|max-min)]|@csv' "$stem-"*.json)
+      IFS=, read -r actual_count actual_ops actual_p99 actual_spread <<< "$actual"
+      awk -v n="$count" -v an="$actual_count" -v ops="$ops" -v ao="$actual_ops" -v p="$p99" -v ap="$actual_p99" -v s="$spread" -v as="$actual_spread" -v cpu="$cpu" 'BEGIN{exit(n!=an||(ops-ao)^2>.01||(p-ap)^2>.000001||s!=as||cpu<0)}' || exit 1
+    done < "$DRIVER_DIR/summary.csv"
+    driver_trials=$(grep -oE 'TRIALS=[0-9]+' "$DRIVER_DIR/manifest.txt" | cut -d= -f2)
+    [[ $driver_trials =~ ^[1-9][0-9]*$ ]] || exit 1
+    awk -F, -v n="$driver_trials" 'NR>1{if($2<1||$2>n||!(($3==1&&($4==1||$4==2||$4==4))||($3==4&&$4==1))||($5!=16&&$5!=64)||seen[$1,$2,$3,$4,$5]++)exit 1}' "$DRIVER_DIR/summary.csv" || exit 1
+    [[ $(($(wc -l < "$DRIVER_DIR/summary.csv")-1)) == "$((driver_trials*24))" ]] || { echo 'Incomplete driver sweep' >&2; exit 1; }
+  fi
+  if [[ -n ${SOAK_DIR:-} ]]; then
+    read_stats "$SOAK_DIR/soak.json" eviction >/dev/null
+    soak_seconds=$(grep -oE 'SOAK_SECONDS=[0-9]+' "$SOAK_DIR/manifest.txt" | cut -d= -f2)
+    [[ $soak_seconds =~ ^[1-9][0-9]*$ ]] || exit 1
+    jq -e --argjson seconds "$soak_seconds" '.["ALL STATS"].Runtime["Total duration"] >= $seconds*990' "$SOAK_DIR/soak.json" >/dev/null || { echo 'Short soak sample' >&2; exit 1; }
+    awk -F, -v seconds="$soak_seconds" 'NR>1{if(NF!=6||$2>10256||$3>8388608||$3<128||$4<=0||($1<last&&n)||(!n&&$1>15))exit 1;n++;last=$1;expired=$5;evictions=$6}END{if(!n||!expired||!evictions||n<seconds/15||last<seconds-15)exit 1}' "$SOAK_DIR/memory.csv" || { echo 'Invalid soak measurements' >&2; exit 1; }
+  fi
+fi
 if [[ -n ${WAL_RESULTS_DIR:-} ]]; then
   source "$ROOT_DIR/benchmarks/common.sh"
   wal_trials=$(grep -oE '(^| )TRIALS=[0-9]+' "$WAL_RESULTS_DIR/manifest.txt" | tail -1 | cut -d= -f2)
@@ -139,7 +167,17 @@ report="$RESULTS_DIR/report.md"
   printf '\n</details>\n\n## Individual memory trials\n\n<details>\n<summary>All measured samples</summary>\n\n'
   printf '| Shape | Server | Trial | Keys | Idle RSS KiB | Loaded RSS KiB | Delta bytes/key |\n|---|---|---:|---:|---:|---:|---:|\n'
   tail -n +2 "$RESULTS_DIR/memory.csv" | sort -t, -k2,2 -k1,1 -k3,3n | awk -F, '{printf "| %s | %s | %d | %d | %d | %d | %.2f |\n",$2,$1,$3,$4,$5,$6,$8}'
-  printf '\n</details>\n\n## Measurement manifest\n\n<details>\n<summary>Revision, executable hash, hardware, tools, and settings</summary>\n\n```text\n'
+  printf '\n</details>\n'
+  if [[ -n ${DRIVER_DIR:-} ]]; then
+    printf '\n## Client driver checks\n\nFixed 16 connections, 100000 keys, 32-byte values, GET, and the recorded CPU affinity. Throughput is total operations divided by the envelope of all process start/finish times. Worst p99 is the worst process percentile, not a pooled percentile. Extra workers sharing assigned cores are not extra physical capacity.\n\n'
+    printf '| Server | Processes | Threads/process | Pipeline | Trials | Mean ops/s | Worst process p99 ms |\n|---|---:|---:|---:|---:|---:|---:|\n'
+    awk -F, 'NR>1{k=$1 FS $3 FS $4 FS $5;n[k]++;ops[k]+=$7;if($8>p[k])p[k]=$8}END{for(k in n){split(k,a,FS);printf "| %s | %s | %s | %s | %s | %.0f | %.3f |\n",a[1],a[2],a[3],a[4],n[k],ops[k]/n[k],p[k]}}' "$DRIVER_DIR/summary.csv" | sort
+  fi
+  if [[ -n ${SOAK_DIR:-} ]]; then
+    printf '\n## Sustained eviction and expiry\n\nMixed SET/GET with 20000 possible keys, a 10000-key limit and an 8 MiB owned-allocation budget. Misses are expected under eviction; request and connection errors are rejected. RSS includes allocator and process memory outside the database budget.\n\n'
+    awk -F, 'NR>1{n++;seconds=$1;if($3>owned)owned=$3;if($4>rss)rss=$4;expired=$5;evictions=$6}END{printf "Observed samples: %d; last sample: %d seconds; peak sampled owned memory: %.2f MiB; peak sampled RSS: %.2f MiB; expired keys: %.0f; evictions: %.0f.\n",n,seconds,owned/1048576,rss/1024,expired,evictions}' "$SOAK_DIR/memory.csv"
+  fi
+  printf '\n## Measurement manifest\n\n<details>\n<summary>Revision, executable hash, hardware, tools, and settings</summary>\n\n```text\n'
   cat "$RESULTS_DIR/manifest.txt"
   printf '```\n\n</details>\n'
 } > "$report.tmp"
@@ -151,6 +189,8 @@ if [[ -n $README_FILE ]]; then
   {
     printf '<!-- benchmark-summary:start -->\n### Benchmark results\n\n'
     printf '%s, measured %s; source revision [%s](https://github.com/amitverma-cf/reddish/commit/%s). Persistence disabled. [Full report](benchmarks/benchmarks.md) contains the same dataset, trial ranges, latency, CPU, memory, and setup.\n\n' "$platform" "${measured:-not recorded}" "${revision:0:7}" "$revision"
+    awk '/^KEYS=/{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}printf "Baseline: %s keys, %s-byte values; client threads: %s, total connections: %d, pipeline: %s; %s trials of %s seconds.\n",v["KEYS"],v["VALUE_BYTES"],v["THREADS"],v["THREADS"]*v["CLIENTS"],v["PIPELINE"],v["TRIALS"],v["DURATION_SECONDS"]}' "$RESULTS_DIR/manifest.txt"
+    printf '\nThese rows use the fixed baseline configuration. The full report lists capacity sweeps separately; changing client threads or pipeline depth changes the result.\n\n'
     [[ -z $run_url ]] || printf '[Source workflow run](%s).\n\n' "$run_url"
     if [[ $worktree_dirty == 1 ]]; then printf 'This run included uncommitted changes; see the recorded hashes in the full report.\n\n'; fi
     awk -F, 'NR>1 && ($2=="reads"||$2=="writes"||$2=="mixed"){samples++;seen[$1]=1;value[$1,$2]=$4} END{if(!samples){print "No throughput samples in this run.";exit}split("reddish redis valkey memcached",servers," ");split("reads writes mixed",work," ");printf "| Workload |";for(i=1;i<=4;i++)if(seen[servers[i]])printf " %s ops/s |",servers[i];printf "\n|---|";for(i=1;i<=4;i++)if(seen[servers[i]])printf "---:|";printf "\n";for(j=1;j<=3;j++){printf "| %s |",work[j];for(i=1;i<=4;i++)if(seen[servers[i]]){if((servers[i],work[j]) in value)printf " %.0f |",value[servers[i],work[j]];else printf " — |"}printf "\n"}}' "$RESULTS_DIR/summary.csv"

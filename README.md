@@ -93,7 +93,19 @@ Command names are case-insensitive. Values supplied through RESP are strings. `I
 
 The default WAL is `reddish.wal`, with `everysec` syncing. Recovery replays the log at startup, retaining absolute expiry times. `always` syncs each write; `none` leaves syncing to the operating system. `--no-wal` disables persistence. Create the parent directory before choosing a custom WAL path. Snapshot flags are no longer supported. The WAL does not compact automatically.
 
+To compact a WAL, stop its server and run:
+
+```sh
+reddish --wal-path reddish.wal --compact-wal
+```
+
+This rewrites live state, verifies the new log, replaces the old file, and exits. It preserves collection order, integer types, and expiry deadlines. The `.lock` sidecar protects the WAL across replacement; leave it in place. Compaction needs space for both generations and fails if another writer holds the lock. It is an offline operation.
+
 Expiry cleanup uses a min-heap, so normal command processing does not scan every key to find expired entries. When the key limit is reached, the least recently used key is evicted. The default limit is 1,024 keys; this is a key count limit, not a byte limit.
+
+`--max-memory <bytes>` adds a database allocation limit; omitting it leaves allocation unlimited. It accounts for slab reservations, direct values, buckets, expiry metadata, promoted hashes, and temporary database allocations. Empty slabs are reclaimed when needed. If the allocation still cannot fit, the write returns `OOM`; this limit does not evict live keys. Rejected writes preserve the target value and TTL. Both limits apply independently.
+
+`INFO memory` exposes `owned_memory_bytes` and `max_memory_bytes`. The allocation budget excludes the database object's fixed size, client/request/reply buffers, WAL/recovery buffers, and allocator/process overhead; it is not an RSS limit. Recovery must fit the configured budget, including intermediate replay states. Compact without a byte limit first if discarded history prevents replay under a tighter limit.
 
 ## C++ client
 
@@ -120,6 +132,10 @@ See [benchmarks/README.md](benchmarks/README.md) for setup and [benchmarks/bench
 ### Benchmark results
 
 GitHub Actions / Ubuntu 24.04, measured 2026-10-31 13:17:53 UTC; source revision [da330d0](https://github.com/amitverma-cf/reddish/commit/da330d0debfc2e3e7f965da3f0bcdd35e0fc7fc4). Persistence disabled. [Full report](benchmarks/benchmarks.md) contains the same dataset, trial ranges, latency, CPU, memory, and setup.
+
+Baseline: 100000 keys, 32-byte values; client threads: 1, total connections: 10, pipeline: 16; 5 trials of 30 seconds.
+
+These rows use the fixed baseline configuration. The full report lists capacity sweeps separately; changing client threads or pipeline depth changes the result.
 
 [Source workflow run](https://github.com/amitverma-cf/reddish/actions/runs/41204638257).
 
