@@ -66,3 +66,18 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install --yes clang-19 ninja-build
+      - run: cmake -S . -B build-fuzz -G Ninja -DCMAKE_CXX_COMPILER=clang++-19 -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF -DREDDISH_BUILD_FUZZERS=ON -DREDDISH_ENABLE_IPO=OFF
+      - run: cmake --build build-fuzz --parallel 4
+      - run: bash tests/fuzz.sh build-fuzz/output/reddish_fuzz local/fuzz-results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: resp-fuzz
+          path: local/fuzz-results/

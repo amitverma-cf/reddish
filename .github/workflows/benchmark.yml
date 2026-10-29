@@ -20,7 +20,7 @@ jobs:
   benchmark:
     if: github.ref == 'refs/heads/main' && github.sha == inputs.commit
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       BENCHMARK_ENVIRONMENT: GitHub Actions / Ubuntu 24.04
     steps:
@@ -37,7 +37,7 @@ jobs:
       - name: Install build and profiling dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes build-essential cmake ninja-build git autoconf automake libtool pkg-config libevent-dev libpcre2-dev zlib1g-dev libssl-dev libzstd-dev memcached valgrind jq iproute2 shellcheck time
+          sudo apt-get install --yes build-essential cmake ninja-build git autoconf automake libtool pkg-config libevent-dev libpcre2-dev zlib1g-dev libssl-dev libzstd-dev memcached valgrind jq iproute2 shellcheck time strace linux-tools-generic
           sudo sysctl -w vm.overcommit_memory=1
           if [[ -e /proc/sys/kernel/sched_schedstats ]]; then sudo sysctl -w kernel.sched_schedstats=1 || true; fi
       - name: Check benchmark scripts
@@ -65,6 +65,11 @@ jobs:
           RESULT_DIR: ${{ github.workspace }}/benchmarks/results/validation
           REDDISH_BINARY: ${{ github.workspace }}/build/output/reddish
         run: bash benchmarks/validate.sh
+      - name: Differential command traces
+        run: |
+          for seed in 731 2026 99991; do
+            python3 tests/integration.py build/output/reddish --redis --seed "$seed" --operations 20000 > "benchmarks/results/differential-$seed.log" 2>&1
+          done
       - name: Select separate physical cores
         run: |
           source benchmarks/common.sh
@@ -103,6 +108,21 @@ jobs:
           RESULT_DIR: ${{ github.workspace }}/benchmarks/results/pressure
           REDDISH_BINARY: ${{ github.workspace }}/build/output/reddish
         run: timeout 600 bash benchmarks/pressure.sh
+      - name: Check client worker and process limits
+        env:
+          RESULT_DIR: ${{ github.workspace }}/benchmarks/results/driver
+          REDDISH_BINARY: ${{ github.workspace }}/build/output/reddish
+        run: bash benchmarks/driver.sh
+      - name: Profile CPU and socket costs
+        run: |
+          perf_bin=$(find /usr/lib/linux-tools -type f -name perf 2>/dev/null | sort -V | tail -1 || true)
+          sudo env PATH="$PATH" PERF_BIN="${perf_bin:-perf}" SERVER_CPU="$SERVER_CPU" CLIENT_CPUS="$CLIENT_CPUS" REDDISH_BINARY="$GITHUB_WORKSPACE/build/output/reddish" RESULT_DIR="$GITHUB_WORKSPACE/benchmarks/results/native-profile" bash benchmarks/profile_native.sh
+      - name: Sustain expiry and eviction for thirty minutes
+        env:
+          RESULT_DIR: ${{ github.workspace }}/benchmarks/results/soak
+          REDDISH_BINARY: ${{ github.workspace }}/build/output/reddish
+          SOAK_SECONDS: 1800
+        run: bash benchmarks/soak.sh
       - name: Profile command costs
         env:
           RESULT_DIR: ${{ github.workspace }}/benchmarks/results/profile
@@ -113,7 +133,7 @@ jobs:
         run: bash benchmarks/network_profile.sh build/output/reddish benchmarks/results/wal
       - name: Write measured report
         run: |
-          VALIDATION_DIR=benchmarks/results/validation CAPACITY_DIR=benchmarks/results/capacity PRESSURE_DIR=benchmarks/results/pressure WAL_RESULTS_DIR=benchmarks/results/wal RESULTS_DIR=benchmarks/results/comparison bash benchmarks/publish_results.sh
+          DRIVER_DIR=benchmarks/results/driver SOAK_DIR=benchmarks/results/soak VALIDATION_DIR=benchmarks/results/validation CAPACITY_DIR=benchmarks/results/capacity PRESSURE_DIR=benchmarks/results/pressure WAL_RESULTS_DIR=benchmarks/results/wal RESULTS_DIR=benchmarks/results/comparison bash benchmarks/publish_results.sh
           cat benchmarks/benchmarks.md >> "$GITHUB_STEP_SUMMARY"
           mkdir -p benchmarks/results/published
           cp README.md benchmarks/results/published/README.md
@@ -151,6 +171,8 @@ jobs:
           export CAPACITY_DIR=local/measured-report/capacity
           export PRESSURE_DIR=local/measured-report/pressure
           export WAL_RESULTS_DIR=local/measured-report/wal
+          export DRIVER_DIR=local/measured-report/driver
+          export SOAK_DIR=local/measured-report/soak
           bash benchmarks/publish_results.sh
           cmp README.md local/measured-report/published/README.md
           cmp benchmarks/benchmarks.md local/measured-report/published/benchmarks.md
