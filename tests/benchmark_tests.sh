@@ -94,6 +94,15 @@ cp "$soak/memory.csv" "$TASK_DIR/soak-original.csv"
 awk -F, 'BEGIN{OFS=","}NR==2{$3=8388609}{print}' "$TASK_DIR/soak-original.csv" > "$soak/memory.csv"
 if SOAK_DIR="$soak" RESULTS_DIR="$run" OUTPUT_FILE="$TASK_DIR/rejected.md" README_FILE='' bash "$ROOT_DIR/benchmarks/publish_results.sh" >/dev/null 2>&1; then echo 'Accepted exceeded allocation budget' >&2; exit 1; fi
 cp "$TASK_DIR/soak-original.csv" "$soak/memory.csv"
+awk -F, 'BEGIN{OFS=","}NR>1{$5=0}{print}' "$TASK_DIR/soak-original.csv" > "$soak/memory.csv"
+SOAK_DIR="$soak" RESULTS_DIR="$run" OUTPUT_FILE="$TASK_DIR/zero-expiry.md" README_FILE='' bash "$ROOT_DIR/benchmarks/publish_results.sh" >/dev/null
+grep -q 'expired keys: 0' "$TASK_DIR/zero-expiry.md"
+for mutation in "NR==4{\$5=0}" "NR==4{\$6=0}" "NR==4{\$1=0}" "NR==2{\$5=-1}" "NR==2{\$4=\"missing\"}" "NR>1{\$6=0}" 'NR>300{next}'; do
+  awk -F, "BEGIN{OFS=\",\"}$mutation{print}" "$TASK_DIR/soak-original.csv" > "$soak/memory.csv"
+  if SOAK_DIR="$soak" RESULTS_DIR="$run" OUTPUT_FILE="$TASK_DIR/rejected.md" README_FILE='' bash "$ROOT_DIR/benchmarks/publish_results.sh" > "$TASK_DIR/soak-rejection.log" 2>&1; then echo "Accepted invalid soak data: $mutation" >&2; exit 1; fi
+  grep -q 'Soak row' "$TASK_DIR/soak-rejection.log"
+done
+cp "$TASK_DIR/soak-original.csv" "$soak/memory.csv"
 printf '<!-- benchmark-summary:end -->\n<!-- benchmark-summary:start -->\n' > "$TASK_DIR/bad-README.md"
 if RESULTS_DIR="$run" OUTPUT_FILE="$TASK_DIR/one-report.md" README_FILE="$TASK_DIR/bad-README.md" bash "$ROOT_DIR/benchmarks/publish_results.sh" >/dev/null 2>&1; then echo 'Accepted reversed README markers' >&2; exit 1; fi
 cmp "$TASK_DIR/one-report.md" "$TASK_DIR/two-report.md"

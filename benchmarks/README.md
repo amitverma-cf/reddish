@@ -71,6 +71,8 @@ TCP profiling requires Valgrind. Callgrind reports user instructions, not elapse
 
 `soak.sh` defaults to 1800 seconds of mixed traffic, eviction and expiry. It checks the 10000-key limit and an 8 MiB database allocation budget while recording RSS. Misses are expected because its key space exceeds its key limit; request errors are rejected. `SOAK_SECONDS` can shorten a local smoke check. Do not describe that shortened run as a thirty-minute soak.
 
+The soak applies EXPIRE concurrently with writes. SET can clear a TTL and eviction can remove a key before its deadline, so its expired-key count can remain zero. The separate expiry pressure scenario checks actual expiry cleanup.
+
 ## GitHub Actions
 
 The [workflow](https://github.com/amitverma-cf/reddish/actions/workflows/benchmark.yml) runs manually for the full current main SHA. It validates commands, selects separate physical cores, compares throughput/memory, sweeps capacity, tests pressure/recovery, and profiles the server. Raw artifacts are retained for 90 days.

@@ -57,7 +57,23 @@ if [[ -n ${DRIVER_DIR:-} || -n ${SOAK_DIR:-} ]]; then
     soak_seconds=$(grep -oE 'SOAK_SECONDS=[0-9]+' "$SOAK_DIR/manifest.txt" | cut -d= -f2)
     [[ $soak_seconds =~ ^[1-9][0-9]*$ ]] || exit 1
     jq -e --argjson seconds "$soak_seconds" '.["ALL STATS"].Runtime["Total duration"] >= $seconds*990' "$SOAK_DIR/soak.json" >/dev/null || { echo 'Short soak sample' >&2; exit 1; }
-    awk -F, -v seconds="$soak_seconds" 'NR>1{if(NF!=6||$2>10256||$3>8388608||$3<128||$4<=0||($1<last&&n)||(!n&&$1>15))exit 1;n++;last=$1;expired=$5;evictions=$6}END{if(!n||!expired||!evictions||n<seconds/15||last<seconds-15)exit 1}' "$SOAK_DIR/memory.csv" || { echo 'Invalid soak measurements' >&2; exit 1; }
+    awk -F, -v seconds="$soak_seconds" '
+      function bad(reason){printf "Soak row %d: %s\n",NR,reason > "/dev/stderr";failed=1;exit 1}
+      NR>1{
+        if(NF!=6)bad("expected six columns")
+        for(i=1;i<=6;i++)if($i!~/^[0-9]+$/)bad("expected nonnegative integer counters")
+        if($2>10256)bad("key limit exceeded")
+        if($3>8388608||$3<128)bad("owned allocation budget invalid")
+        if($4<=0)bad("missing RSS sample")
+        if(n&&($1<last||$5<expired||$6<evictions))bad("time or cumulative counters decreased")
+        if(!n&&$1>15)bad("sampling started late")
+        n++;last=$1;expired=$5;evictions=$6
+      }
+      END{
+        if(failed)exit 1
+        if(!n||n<seconds/15||last<seconds-15)bad("incomplete sampling interval")
+        if(!evictions)bad("eviction pressure was not observed")
+      }' "$SOAK_DIR/memory.csv" || { echo 'Invalid soak measurements' >&2; exit 1; }
   fi
 fi
 if [[ -n ${WAL_RESULTS_DIR:-} ]]; then
@@ -174,7 +190,7 @@ report="$RESULTS_DIR/report.md"
     awk -F, 'NR>1{k=$1 FS $3 FS $4 FS $5;n[k]++;ops[k]+=$7;if($8>p[k])p[k]=$8}END{for(k in n){split(k,a,FS);printf "| %s | %s | %s | %s | %s | %.0f | %.3f |\n",a[1],a[2],a[3],a[4],n[k],ops[k]/n[k],p[k]}}' "$DRIVER_DIR/summary.csv" | sort
   fi
   if [[ -n ${SOAK_DIR:-} ]]; then
-    printf '\n## Sustained eviction and expiry\n\nMixed SET/GET with 20000 possible keys, a 10000-key limit and an 8 MiB owned-allocation budget. Misses are expected under eviction; request and connection errors are rejected. RSS includes allocator and process memory outside the database budget.\n\n'
+    printf '\n## Sustained eviction and expiry\n\nMixed SET/GET with 20000 possible keys, a 10000-key limit and an 8 MiB owned-allocation budget. Misses are expected under eviction; request and connection errors are rejected. Concurrent EXPIRE calls may produce zero expirations when SET clears TTLs or eviction removes keys first. The separate expiry pressure scenario verifies actual expiration. RSS includes allocator and process memory outside the database budget.\n\n'
     awk -F, 'NR>1{n++;seconds=$1;if($3>owned)owned=$3;if($4>rss)rss=$4;expired=$5;evictions=$6}END{printf "Observed samples: %d; last sample: %d seconds; peak sampled owned memory: %.2f MiB; peak sampled RSS: %.2f MiB; expired keys: %.0f; evictions: %.0f.\n",n,seconds,owned/1048576,rss/1024,expired,evictions}' "$SOAK_DIR/memory.csv"
   fi
   printf '\n## Measurement manifest\n\n<details>\n<summary>Revision, executable hash, hardware, tools, and settings</summary>\n\n```text\n'

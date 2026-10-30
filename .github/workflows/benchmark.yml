@@ -138,6 +138,12 @@ jobs:
           mkdir -p benchmarks/results/published
           cp README.md benchmarks/results/published/README.md
           cp benchmarks/benchmarks.md benchmarks/results/published/benchmarks.md
+      - name: Make diagnostics readable by the artifact uploader
+        if: always()
+        run: |
+          if [[ -d "$GITHUB_WORKSPACE/benchmarks/results" ]]; then
+            sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/benchmarks/results"
+          fi
       - name: Preserve results and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
