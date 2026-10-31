@@ -119,28 +119,28 @@ See [benchmarks/README.md](benchmarks/README.md) for setup and [benchmarks/bench
 <!-- benchmark-summary:start -->
 ### Benchmark results
 
-GitHub Actions / Ubuntu 24.04, measured 2026-10-31 06:58:23 UTC; source revision [37fa2e4](https://github.com/amitverma-cf/reddish/commit/37fa2e4e55fc632abae4e4117eb26f60d712f5fd). Persistence disabled. [Full report](benchmarks/benchmarks.md) contains the same dataset, trial ranges, latency, CPU, memory, and setup.
+GitHub Actions / Ubuntu 24.04, measured 2026-10-31 13:17:53 UTC; source revision [da330d0](https://github.com/amitverma-cf/reddish/commit/da330d0debfc2e3e7f965da3f0bcdd35e0fc7fc4). Persistence disabled. [Full report](benchmarks/benchmarks.md) contains the same dataset, trial ranges, latency, CPU, memory, and setup.
 
-[Source workflow run](https://github.com/amitverma-cf/reddish/actions/runs/41178440561).
+[Source workflow run](https://github.com/amitverma-cf/reddish/actions/runs/41204638257).
 
 | Workload | reddish ops/s | redis ops/s | valkey ops/s | memcached ops/s |
 |---|---:|---:|---:|---:|
-| reads | 1013326 | 1064699 | 1067436 | 1118063 |
-| writes | 956837 | 1023477 | 1008318 | 1089096 |
-| mixed | 972967 | 1044922 | 1042838 | — |
+| reads | 1210722 | 1257425 | 1250783 | 1299509 |
+| writes | 1127578 | 1201410 | 1162666 | 1238113 |
+| mixed | 1170320 | 1236031 | 1214440 | — |
 
 | Shape | Server | RSS MiB | Delta bytes/key |
 |---|---|---:|---:|
-| hashes | reddish | 14.35 | 108.91 |
-| hashes | redis | 19.16 | 110.13 |
-| hashes | valkey | 17.31 | 103.88 |
-| lists | reddish | 15.06 | 116.12 |
-| lists | redis | 19.17 | 110.27 |
-| lists | valkey | 17.42 | 103.03 |
-| strings | memcached | 17.68 | 137.09 |
-| strings | reddish | 12.75 | 91.87 |
-| strings | redis | 17.67 | 94.26 |
-| strings | valkey | 15.79 | 87.49 |
+| hashes | reddish | 14.36 | 108.91 |
+| hashes | redis | 19.04 | 110.07 |
+| hashes | valkey | 17.17 | 103.74 |
+| lists | reddish | 15.07 | 116.12 |
+| lists | redis | 18.98 | 110.04 |
+| lists | valkey | 17.18 | 103.30 |
+| strings | memcached | 17.67 | 137.09 |
+| strings | reddish | 12.75 | 91.95 |
+| strings | redis | 17.36 | 92.56 |
+| strings | valkey | 15.73 | 87.52 |
 
 <!-- benchmark-summary:end -->
 
